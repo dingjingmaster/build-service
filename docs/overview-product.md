@@ -1,0 +1,102 @@
+# buildsvc 产品概览
+
+> 文档元数据
+> - 文档版本：v1.0.0
+> - 最后更新：2026-06-26
+> - 更新来源：docs/dev/1-*.md
+
+## 1. 产品定位
+
+- 目标用户：在可信局域网内自用的构建维护者。
+- 核心问题：用一台主机器把源码包分发到多台不同平台机器上，执行固定脚本，并集中查看执行过程、日志和结果。
+- 核心价值：用一个轻量 Rust 二进制提供 server/agent 两种角色，不依赖 Jenkins、Gitea、K8s 等重型平台。
+- 非目标：通用 CI 平台、复杂 workflow 编排、构建产物管理、权限多租户、互联网暴露服务。
+
+## 2. 功能边界
+
+- 核心功能：
+  - 启动时读取 INI 配置，根据 `role` 进入 server 或 agent。
+  - 支持通过 `-c` / `--config` 指定配置文件；不指定时自动发现默认配置。
+  - server 提供 Web UI，上传 `tar.gz`/`zip` 源码包。
+  - 用户按 agent 名或 labels 选择目标 agent。
+  - agent 通过 WebSocket 连接 server，启动时自动上报最新计算机名，接收 run，下载源码包，解包并执行固定脚本。
+  - server 实时显示 agent 状态、run 状态、日志和退出码。
+  - server 支持删除 offline agent。
+  - failed/lost/canceled/success run 可手动 rerun。
+- 不支持功能：
+  - 第一版不支持断点续传。
+  - 第一版不管理 artifacts。
+  - 第一版 Web UI 不登录。
+  - 第一版不支持自定义 workflow 文件。
+- 关键对象：agent、build、run、source archive、log。
+- 关键状态：`queued`、`assigned`、`preparing`、`running`、`success`、`failed`、`canceled`、`lost`。
+
+## 3. 关键场景
+
+| 场景 | 用户目标 | 成功标准 | 异常/边界 |
+|------|----------|----------|-----------|
+| 提交构建 | 上传源码包并选择目标 agent | 每个选中 agent 创建一个 run | 未选择目标、包格式不支持、包为空时拒绝 |
+| 执行构建 | agent 运行源码根目录固定脚本 | exit code 0 为 success，非 0 为 failed | 脚本缺失、解包失败或超时为 failed |
+| 查看状态 | server 实时展示 agent 和 run | Web UI 通过 WebSocket 更新；Agents 在线优先，再按计算机名排序 | agent 断线后显示 offline，运行中 run 标记 lost |
+| 重跑任务 | 手动重跑已结束 run | 新建 queued run 并重新调度 | running run 不允许 rerun |
+
+## 4. 核心流程
+
+```text
+1. server 启动，读取 INI，初始化 SQLite 和数据目录。
+2. agent 启动，读取 INI，通过 WebSocket hello/heartbeat 注册到 server。
+3. 用户在 Web UI 上传源码包，并选择 agent 名或 labels。
+4. server 创建 build 和 runs，并向在线且有容量的 agent 下发 run_start。
+5. agent 下载源码包，解包顶层唯一目录，执行 run-build.sh 或 run-build.bat。
+6. agent 通过 WebSocket 回传日志、状态和最终退出码。
+7. server 更新 Web UI，并允许用户对结束 run 手动 rerun。
+```
+
+## 5. 产品规则
+
+- 权限规则：
+  - 每个 agent 独立 token。
+  - Web UI 第一版不登录，仅适合可信局域网。
+- 状态流转：
+  - 正常：`queued -> assigned -> preparing -> running -> success/failed`。
+  - 取消：`queued/assigned/preparing/running -> canceled`。
+  - 断线：运行中 run 标记 `lost`。
+- 异常处理：
+  - server 启动时将历史 active run 标记 `lost`。
+  - agent 按 server 下发的心跳间隔上报 heartbeat。
+  - 默认心跳间隔为 5 秒，server 默认 15 秒未收到心跳则将 agent 显示为 `offline`。
+  - agent 断线后 server 标记该 agent 的 active run 为 `lost`。
+  - agent 连接断开后会取消本地运行任务。
+- 兼容约束：
+  - 支持 Linux、Windows、macOS。
+  - 源码包必须是 `tar.gz`、`tgz` 或 `zip`。
+  - 压缩包顶层必须只有一个目录。
+- 用户可见行为：
+  - 日志实时追加展示。
+  - agent 选择只基于 agent 名和 labels。
+  - Agents 列表显示 agent 名、最新计算机名、状态和容量。
+  - Agents 列表排序为在线 agent 优先，离线 agent 靠后，同组内按计算机名排序。
+  - offline agent 可从 server 运行时列表删除；删除后该 agent 不再显示，也不能继续用原 token 接入，直到 server 重启或重新加入配置。
+
+## 6. 非功能要求
+
+- 性能：源码上传流式写入磁盘，不整体读入内存。
+- 可用性：agent 主动连接 server，适配局域网和 NAT 场景。
+- 安全：无构建隔离；脚本以 agent 进程权限运行，只适合可信源码和可信网络。
+- 兼容性：跨平台脚本名固定，平台差异由脚本和 agent 执行器处理。
+- 可观测性：server 记录 run 状态和日志文件；自身日志使用 tracing。
+
+## 7. 文档索引
+
+- 需求与任务索引：docs/dev/README.md
+- 开发概览：docs/overview-product-dev.md
+- 架构笔记：docs/architecture.md
+- 关键任务文档：
+  - docs/dev/1-research-buildsvc-mvp.md
+  - docs/dev/1-plan-buildsvc-mvp.md
+
+## 8. 变更记录
+
+| 日期 | 变更 | 影响 | 关联文档 |
+|------|------|------|----------|
+| 2026-06-26 | 创建 MVP 产品边界 | 明确 server/agent/Web UI/固定脚本执行模型 | docs/dev/1-*.md |
