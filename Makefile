@@ -1,4 +1,4 @@
-.PHONY: release debug test deb rpm emerge
+.PHONY:clean release debug test deb rpm emerge
 
 release:
 	cargo build --release
@@ -17,3 +17,7 @@ rpm: release
 
 emerge: release
 	sh packaging/package.sh emerge
+
+clean:
+	-rm -f target/debug/buildsvc
+	-rm -f target/release/buildsvc

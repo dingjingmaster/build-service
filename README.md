@@ -389,9 +389,10 @@ Web UI 的 Upgrades tab 支持上传：
 1. server 保存上传包并计算 sha256。
 2. server 通过 agent WebSocket 下发升级指令。
 3. agent 下载升级包并校验 sha256。
-4. agent 调用对应包管理器安装。
-5. agent 执行 `systemctl daemon-reload` 和 `systemctl restart buildsvc`。
-6. agent 重连后在 Agents 表显示新版本。
+4. agent 调用对应包管理器安装；deb 如果遇到 `dpkg was interrupted` 类错误，会写入后台脚本并优先通过 `systemd-run` 独立执行，回退使用 `nohup`。
+5. 正常升级完成后，agent 删除本次 `<upgrade_work_dir>/<upgrade_id>` 临时目录；后台 deb 脚本成功后也会自行删除对应目录。
+6. agent 执行 `systemctl daemon-reload` 和 `systemctl restart buildsvc`。
+7. agent 重连后在 Agents 表显示新版本。
 
 配置文件不会被强制覆盖：
 

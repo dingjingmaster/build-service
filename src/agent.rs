@@ -71,6 +71,11 @@ enum TerminalCommand {
     Close,
 }
 
+enum UpgradeOutcome {
+    Completed,
+    Deferred,
+}
+
 pub async fn run(core: CoreConfig, config: AgentConfig) -> anyhow::Result<()> {
     fs::create_dir_all(&core.data_dir)
         .await
@@ -418,6 +423,20 @@ mod tests {
         assert!(
             validate_upgrade_package_filename(UpgradePackageKind::Deb, "buildsvc.rpm").is_err()
         );
+    }
+
+    #[test]
+    fn deferred_deb_upgrade_script_recovers_installs_and_cleans() {
+        let script = deferred_deb_upgrade_script(
+            Path::new("/tmp/buildsvc/pkg's/buildsvc.deb"),
+            Path::new("/tmp/buildsvc/upgrades/upgrade_123"),
+            Path::new("/tmp/buildsvc/upgrades/upgrade_123/deferred-deb-upgrade.log"),
+        );
+        assert!(script.contains("dpkg --configure -a"));
+        assert!(script.contains("apt-get install -y -o Dpkg::Options::=--force-confold"));
+        assert!(script.contains("dpkg --force-confold -i"));
+        assert!(script.contains("rm -rf -- \"$UPGRADE_DIR\""));
+        assert!(script.contains("'\"'\"'"));
     }
 }
 
@@ -937,8 +956,16 @@ async fn start_upgrade(
         )
         .await;
 
-        if let Err(err) = result {
-            send_upgrade_status(&task_runtime, &upgrade_id, "failed", Some(err.to_string()));
+        let clear_active = match result {
+            Ok(UpgradeOutcome::Completed) => true,
+            Ok(UpgradeOutcome::Deferred) => false,
+            Err(err) => {
+                send_upgrade_status(&task_runtime, &upgrade_id, "failed", Some(err.to_string()));
+                true
+            }
+        };
+        if !clear_active {
+            return;
         }
         let mut active = task_runtime.upgrade.lock().await;
         if active.as_deref() == Some(upgrade_id.as_str()) {
@@ -975,7 +1002,7 @@ async fn execute_upgrade(
     package_kind: UpgradePackageKind,
     filename: String,
     sha256: String,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<UpgradeOutcome> {
     let filename = validate_upgrade_package_filename(package_kind, &filename)?;
     let upgrade_dir = runtime.config.upgrade_work_dir.join(&upgrade_id);
     match fs::remove_dir_all(&upgrade_dir).await {
@@ -997,7 +1024,7 @@ async fn execute_upgrade(
         "installing",
         Some(package_kind.to_string()),
     );
-    install_upgrade_package(
+    let outcome = install_upgrade_package(
         &runtime,
         &upgrade_id,
         package_kind,
@@ -1005,8 +1032,13 @@ async fn execute_upgrade(
         &upgrade_dir,
     )
     .await?;
+    if matches!(outcome, UpgradeOutcome::Deferred) {
+        return Ok(outcome);
+    }
 
     send_upgrade_status(&runtime, &upgrade_id, "installed", None);
+    send_upgrade_status(&runtime, &upgrade_id, "cleaning", Some(upgrade_id.clone()));
+    cleanup_upgrade_dir(&upgrade_dir).await?;
     run_systemctl_daemon_reload(&runtime, &upgrade_id).await?;
     send_upgrade_status(
         &runtime,
@@ -1016,7 +1048,7 @@ async fn execute_upgrade(
     );
     request_service_restart().await?;
     send_upgrade_status(&runtime, &upgrade_id, "restart_requested", None);
-    Ok(())
+    Ok(UpgradeOutcome::Completed)
 }
 
 async fn download_upgrade_package(
@@ -1053,18 +1085,32 @@ async fn download_upgrade_package(
     Ok(())
 }
 
+async fn cleanup_upgrade_dir(upgrade_dir: &Path) -> anyhow::Result<()> {
+    match fs::remove_dir_all(upgrade_dir).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("remove {}", upgrade_dir.display())),
+    }
+}
+
 async fn install_upgrade_package(
     runtime: &AgentRuntime,
     upgrade_id: &str,
     package_kind: UpgradePackageKind,
     package_path: &Path,
     upgrade_dir: &Path,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<UpgradeOutcome> {
     match package_kind {
-        UpgradePackageKind::Deb => install_deb(runtime, upgrade_id, package_path).await,
-        UpgradePackageKind::Rpm => install_rpm(runtime, upgrade_id, package_path).await,
+        UpgradePackageKind::Deb => {
+            install_deb(runtime, upgrade_id, package_path, upgrade_dir).await
+        }
+        UpgradePackageKind::Rpm => {
+            install_rpm(runtime, upgrade_id, package_path).await?;
+            Ok(UpgradeOutcome::Completed)
+        }
         UpgradePackageKind::Emerge => {
-            install_gentoo_overlay(runtime, upgrade_id, package_path, upgrade_dir).await
+            install_gentoo_overlay(runtime, upgrade_id, package_path, upgrade_dir).await?;
+            Ok(UpgradeOutcome::Completed)
         }
     }
 }
@@ -1073,15 +1119,29 @@ async fn install_deb(
     runtime: &AgentRuntime,
     upgrade_id: &str,
     package_path: &Path,
-) -> anyhow::Result<()> {
+    upgrade_dir: &Path,
+) -> anyhow::Result<UpgradeOutcome> {
     let first_result = run_deb_install(runtime, upgrade_id, package_path).await;
     if first_result.is_ok() {
-        return Ok(());
+        return Ok(UpgradeOutcome::Completed);
     }
 
     let first_error = first_result.unwrap_err().to_string();
     if !command_exists("dpkg") {
         bail!(first_error);
+    }
+
+    if command_exists("systemd-run") || command_exists("nohup") {
+        send_upgrade_status(
+            runtime,
+            upgrade_id,
+            "deferred",
+            Some("dpkg --configure -a && deb install".to_owned()),
+        );
+        start_deferred_deb_upgrade(runtime, upgrade_id, package_path, upgrade_dir)
+            .await
+            .with_context(|| format!("deb install failed ({first_error}); defer failed"))?;
+        return Ok(UpgradeOutcome::Deferred);
     }
 
     send_upgrade_status(
@@ -1105,7 +1165,7 @@ async fn install_deb(
     run_deb_install(runtime, upgrade_id, package_path)
         .await
         .with_context(|| format!("deb install failed ({first_error}); retry failed"))?;
-    Ok(())
+    Ok(UpgradeOutcome::Completed)
 }
 
 async fn run_deb_install(
@@ -1140,6 +1200,128 @@ async fn run_dpkg_configure(runtime: &AgentRuntime, upgrade_id: &str) -> anyhow:
         .arg("--configure")
         .arg("-a");
     run_upgrade_command(runtime, upgrade_id, "dpkg --configure -a", command).await
+}
+
+async fn start_deferred_deb_upgrade(
+    runtime: &AgentRuntime,
+    upgrade_id: &str,
+    package_path: &Path,
+    upgrade_dir: &Path,
+) -> anyhow::Result<()> {
+    let script_path = upgrade_dir.join("deferred-deb-upgrade.sh");
+    let log_path = upgrade_dir.join("deferred-deb-upgrade.log");
+    fs::write(
+        &script_path,
+        deferred_deb_upgrade_script(package_path, upgrade_dir, &log_path),
+    )
+    .await
+    .with_context(|| format!("write {}", script_path.display()))?;
+
+    let script_path = absolute_path(&script_path);
+    if command_exists("systemd-run") {
+        let mut command = Command::new("systemd-run");
+        command
+            .arg(format!(
+                "--unit=buildsvc-deb-upgrade-{}",
+                Uuid::new_v4().simple()
+            ))
+            .arg("--collect")
+            .arg("/bin/sh")
+            .arg(script_path.as_os_str())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match command.status().await {
+            Ok(status) if status.success() => {
+                send_upgrade_status(
+                    runtime,
+                    upgrade_id,
+                    "deferred",
+                    Some(format!("systemd-run {}", log_path.display())),
+                );
+                return Ok(());
+            }
+            Ok(status) => {
+                warn!(%status, "systemd-run deb upgrade scheduling failed; falling back to nohup");
+            }
+            Err(err) => {
+                warn!(%err, "failed to spawn systemd-run deb upgrade; falling back to nohup");
+            }
+        }
+    }
+
+    if command_exists("nohup") {
+        let mut command = Command::new("nohup");
+        command
+            .arg("/bin/sh")
+            .arg(script_path.as_os_str())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command.spawn().context("spawn nohup deb upgrade script")?;
+        send_upgrade_status(
+            runtime,
+            upgrade_id,
+            "deferred",
+            Some(format!("nohup {}", log_path.display())),
+        );
+        return Ok(());
+    }
+
+    bail!("neither systemd-run nor nohup was found")
+}
+
+fn deferred_deb_upgrade_script(package_path: &Path, upgrade_dir: &Path, log_path: &Path) -> String {
+    let package_path = shell_quote_path(package_path);
+    let upgrade_dir = shell_quote_path(upgrade_dir);
+    let log_path = shell_quote_path(log_path);
+    format!(
+        r#"#!/bin/sh
+set -eu
+
+PACKAGE={package_path}
+UPGRADE_DIR={upgrade_dir}
+LOG={log_path}
+
+{{
+    echo "[buildsvc] deferred deb upgrade started: $(date -Is 2>/dev/null || date)"
+    export DEBIAN_FRONTEND=noninteractive
+    dpkg --configure -a
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get install -y -o Dpkg::Options::=--force-confold "$PACKAGE"
+    else
+        dpkg --force-confold -i "$PACKAGE"
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    cd /
+    rm -rf -- "$UPGRADE_DIR"
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl restart buildsvc.service >/dev/null 2>&1 || true
+    fi
+}} >> "$LOG" 2>&1
+"#
+    )
+}
+
+fn shell_quote_path(path: &Path) -> String {
+    let absolute = absolute_path(path);
+    shell_quote(absolute.to_string_lossy().as_ref())
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
 }
 
 async fn install_rpm(
