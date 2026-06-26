@@ -232,6 +232,8 @@ pub enum UiMessage {
     UpgradeLog {
         agent_id: String,
         upgrade_id: String,
+        stream: Option<LogStream>,
+        seq: Option<u64>,
         data: String,
     },
 }

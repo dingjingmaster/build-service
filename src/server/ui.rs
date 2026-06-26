@@ -165,6 +165,22 @@ const INDEX_HTML: &str = r#"<!doctype html>
       padding: 4px 8px;
       font-size: 12px;
     }
+    button.sort-button {
+      min-height: 0;
+      margin-left: 4px;
+      border: 0;
+      border-radius: 3px;
+      padding: 1px 4px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1;
+      vertical-align: middle;
+    }
+    button.sort-button.active {
+      background: #e8f1fc;
+      color: var(--accent);
+    }
     button:disabled {
       opacity: 0.5;
       cursor: not-allowed;
@@ -382,7 +398,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                     <tr>
                       <th class="run-select"><input id="selectAllRuns" type="checkbox"></th>
                       <th class="run-agent">Computer / IP</th>
-                      <th class="run-status">Status</th>
+                      <th class="run-status">Status <button class="sort-button active" type="button" data-run-sort="status" title="Sort Status">↑</button></th>
                     </tr>
                   </thead>
                   <tbody id="runsBody"></tbody>
@@ -422,11 +438,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <table>
                     <thead>
                       <tr>
-                        <th class="agent-computer">Computer</th>
-                        <th class="agent-ip">IP</th>
-                        <th class="agent-os">OS</th>
-                        <th class="agent-arch">Arch</th>
-                        <th class="agent-version">Version</th>
+                        <th class="agent-computer">Computer <button class="sort-button active" type="button" data-agent-sort="computer_name" title="Sort Computer">↑</button></th>
+                        <th class="agent-ip">IP <button class="sort-button" type="button" data-agent-sort="ip" title="Sort IP">↕</button></th>
+                        <th class="agent-os">OS <button class="sort-button" type="button" data-agent-sort="platform" title="Sort OS">↕</button></th>
+                        <th class="agent-arch">Arch <button class="sort-button" type="button" data-agent-sort="arch" title="Sort Arch">↕</button></th>
+                        <th class="agent-version">Version <button class="sort-button" type="button" data-agent-sort="version" title="Sort Version">↕</button></th>
                         <th class="agent-running">Tasks</th>
                         <th class="agent-status">Status</th>
                         <th class="agent-terminal">Terminal</th>
@@ -511,6 +527,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let terminalBuffer = "";
     let terminalAgent = null;
     let activeTab = "build";
+    let agentSort = { key: "computer_name", direction: "asc" };
+    let runSort = { key: "status", direction: "asc" };
+    let upgradeLogBuffers = new Map();
 
     const socketStatus = document.getElementById("socketStatus");
     const buildTab = document.getElementById("buildTab");
@@ -528,6 +547,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const upgradeLog = document.getElementById("upgradeLog");
     const agentsCount = document.getElementById("agentsCount");
     const agentsBody = document.getElementById("agentsBody");
+    const agentSortButtons = Array.from(document.querySelectorAll("button[data-agent-sort]"));
     const buildsBody = document.getElementById("buildsBody");
     const selectAllBuilds = document.getElementById("selectAllBuilds");
     const deleteBuildsBtn = document.getElementById("deleteBuildsBtn");
@@ -535,6 +555,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const runsBody = document.getElementById("runsBody");
     const runsCount = document.getElementById("runsCount");
     const selectAllRuns = document.getElementById("selectAllRuns");
+    const runSortButtons = Array.from(document.querySelectorAll("button[data-run-sort]"));
     const logEl = document.getElementById("log");
     const selectedRunEl = document.getElementById("selectedRun");
     const rerunBtn = document.getElementById("rerunBtn");
@@ -594,6 +615,101 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return display(value);
     }
 
+    const textCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+    function ipv4Parts(value) {
+      const parts = String(value || "").trim().split(".");
+      if (parts.length !== 4) return null;
+      const numbers = parts.map(part => /^\d+$/.test(part) ? Number(part) : NaN);
+      return numbers.every(number => Number.isInteger(number) && number >= 0 && number <= 255)
+        ? numbers
+        : null;
+    }
+
+    function compareNumberArrays(left, right) {
+      for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+        const diff = (left[index] ?? 0) - (right[index] ?? 0);
+        if (diff !== 0) return diff;
+      }
+      return 0;
+    }
+
+    function agentSortText(agent, key) {
+      if (key === "computer_name") return display(agent.computer_name);
+      if (key === "ip") return display(agent.ip);
+      if (key === "platform") return formatOs(agent.platform);
+      if (key === "arch") return formatArch(agent.arch);
+      if (key === "version") return display(agent.version);
+      return "";
+    }
+
+    function compareAgents(left, right) {
+      let result = 0;
+      if (agentSort.key === "ip") {
+        const leftIp = ipv4Parts(left.ip);
+        const rightIp = ipv4Parts(right.ip);
+        if (leftIp && rightIp) result = compareNumberArrays(leftIp, rightIp);
+      }
+      if (result === 0) {
+        result = textCollator.compare(
+          agentSortText(left, agentSort.key),
+          agentSortText(right, agentSort.key)
+        );
+      }
+      if (result === 0) {
+        result = textCollator.compare(display(left.computer_name), display(right.computer_name));
+      }
+      return agentSort.direction === "asc" ? result : -result;
+    }
+
+    function renderAgentSortButtons() {
+      for (const button of agentSortButtons) {
+        const active = button.dataset.agentSort === agentSort.key;
+        button.classList.toggle("active", active);
+        button.textContent = active
+          ? (agentSort.direction === "asc" ? "↑" : "↓")
+          : "↕";
+        button.title = active
+          ? `Sort ${button.dataset.agentSort} ${agentSort.direction === "asc" ? "ascending" : "descending"}`
+          : `Sort ${button.dataset.agentSort}`;
+      }
+    }
+
+    const runStatusOrder = new Map([
+      ["queued", 0],
+      ["assigned", 1],
+      ["preparing", 2],
+      ["running", 3],
+      ["success", 4],
+      ["failed", 5],
+      ["canceled", 6],
+      ["lost", 7]
+    ]);
+
+    function compareRuns(left, right) {
+      const leftRank = runStatusOrder.has(left.status) ? runStatusOrder.get(left.status) : 99;
+      const rightRank = runStatusOrder.has(right.status) ? runStatusOrder.get(right.status) : 99;
+      let result = leftRank - rightRank;
+      if (result === 0) {
+        result = textCollator.compare(display(left.status), display(right.status));
+      }
+      if (result === 0) {
+        result = textCollator.compare(agentComputerIp(left.agent_id), agentComputerIp(right.agent_id));
+      }
+      return runSort.direction === "asc" ? result : -result;
+    }
+
+    function renderRunSortButtons() {
+      for (const button of runSortButtons) {
+        const active = button.dataset.runSort === runSort.key;
+        button.classList.toggle("active", active);
+        button.textContent = active
+          ? (runSort.direction === "asc" ? "↑" : "↓")
+          : "↕";
+        button.title = `Sort Status ${runSort.direction === "asc" ? "ascending" : "descending"}`;
+      }
+    }
+
     function agentComputerIp(agentId) {
       const agent = state.agents.find(item => item.id === agentId);
       if (!agent) return agentId;
@@ -641,6 +757,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       selectAllUpgradeAgents.textContent = upgradeAgentIds.size > 0 && [...upgradeAgentIds].every(agentId => selectedUpgradeAgents.has(agentId))
         ? "Clear All"
         : "Select All";
+      renderAgentSortButtons();
+      renderRunSortButtons();
 
       agentChecks.innerHTML = state.agents.map(agent => `
         <label class="agent-item">
@@ -688,7 +806,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
         });
       }
 
-      agentsBody.innerHTML = state.agents.map(agent => `
+      const sortedAgents = [...state.agents].sort(compareAgents);
+      agentsBody.innerHTML = sortedAgents.map(agent => `
         <tr>
           <td title="${escapeHtml(display(agent.computer_name))}">${escapeHtml(display(agent.computer_name))}</td>
           <td title="${escapeHtml(display(agent.ip))}">${escapeHtml(display(agent.ip))}</td>
@@ -743,7 +862,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
         logEl.textContent = "";
       }
 
-      runsBody.innerHTML = state.runs.map(run => `
+      const sortedRuns = [...state.runs].sort(compareRuns);
+      runsBody.innerHTML = sortedRuns.map(run => `
         <tr class="selectable ${selectedRuns.has(run.id) ? "selected" : ""}" data-run="${escapeHtml(run.id)}">
           <td class="run-select"><input type="checkbox" name="runSelect" value="${escapeHtml(run.id)}" ${selectedRuns.has(run.id) ? "checked" : ""}></td>
           <td title="${escapeHtml(agentComputerIp(run.agent_id))}">${escapeHtml(agentComputerIp(run.agent_id))}</td>
@@ -832,12 +952,84 @@ const INDEX_HTML: &str = r#"<!doctype html>
       render();
     });
 
-    function appendUpgradeLog(value) {
+    for (const button of agentSortButtons) {
+      button.addEventListener("click", () => {
+        const key = button.dataset.agentSort;
+        if (agentSort.key === key) {
+          agentSort.direction = agentSort.direction === "asc" ? "desc" : "asc";
+        } else {
+          agentSort = { key, direction: "asc" };
+        }
+        render();
+      });
+    }
+
+    for (const button of runSortButtons) {
+      button.addEventListener("click", () => {
+        const key = button.dataset.runSort;
+        if (runSort.key === key) {
+          runSort.direction = runSort.direction === "asc" ? "desc" : "asc";
+        } else {
+          runSort = { key, direction: "asc" };
+        }
+        render();
+      });
+    }
+
+    function appendUpgradeLogText(value) {
       upgradeLog.textContent += value;
       if (upgradeLog.textContent.length > 200000) {
         upgradeLog.textContent = upgradeLog.textContent.slice(-160000);
       }
       upgradeLog.scrollTop = upgradeLog.scrollHeight;
+    }
+
+    function upgradeLogPrefix(message) {
+      return message.stream === "stderr"
+        ? `[${message.agent_id} stderr] `
+        : `[${message.agent_id}] `;
+    }
+
+    function flushUpgradeLogBuffers(filter = {}) {
+      for (const [key, entry] of upgradeLogBuffers) {
+        if (filter.agent_id && entry.agent_id !== filter.agent_id) continue;
+        if (filter.upgrade_id && entry.upgrade_id !== filter.upgrade_id) continue;
+        if (entry.text !== "") appendUpgradeLogText(`${entry.prefix}${entry.text}\n`);
+        upgradeLogBuffers.delete(key);
+      }
+    }
+
+    function appendUpgradeLog(message) {
+      if (typeof message === "string") {
+        appendUpgradeLogText(message);
+        return;
+      }
+      if (!message.stream) {
+        flushUpgradeLogBuffers({ agent_id: message.agent_id, upgrade_id: message.upgrade_id });
+        appendUpgradeLogText(String(message.data || "").endsWith("\n")
+          ? String(message.data || "")
+          : `${String(message.data || "")}\n`);
+        return;
+      }
+
+      const key = `${message.upgrade_id}\u0001${message.agent_id}\u0001${message.stream}`;
+      const entry = upgradeLogBuffers.get(key) || {
+        agent_id: message.agent_id,
+        upgrade_id: message.upgrade_id,
+        prefix: upgradeLogPrefix(message),
+        text: ""
+      };
+      entry.text += String(message.data || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+      const lines = entry.text.split("\n");
+      entry.text = lines.pop() || "";
+      for (const line of lines) {
+        appendUpgradeLogText(`${entry.prefix}${line}\n`);
+      }
+      if (entry.text === "") {
+        upgradeLogBuffers.delete(key);
+      } else {
+        upgradeLogBuffers.set(key, entry);
+      }
     }
 
     upgradeForm.addEventListener("submit", async event => {
@@ -1138,7 +1330,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           logEl.textContent += message.data;
           logEl.scrollTop = logEl.scrollHeight;
         } else if (message.type === "upgrade_log") {
-          appendUpgradeLog(message.data);
+          appendUpgradeLog(message);
         }
       };
     }

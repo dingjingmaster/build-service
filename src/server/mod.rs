@@ -36,7 +36,7 @@ use crate::{
     config::{CoreConfig, ServerConfig},
     ids,
     protocol::{
-        AgentToServer, AgentView, ArchiveFormat, LogStream, ServerToAgent, UiMessage, UiState,
+        AgentToServer, AgentView, ArchiveFormat, ServerToAgent, UiMessage, UiState,
         UpgradePackageKind,
     },
     storage::{NewRun, Storage, now_ts},
@@ -1077,6 +1077,8 @@ async fn handle_agent_message(state: &AppState, agent_id: &str, text: &str) -> a
             let _ = state.ui_tx.send(UiMessage::UpgradeLog {
                 agent_id: agent_id.to_owned(),
                 upgrade_id,
+                stream: None,
+                seq: None,
                 data: log,
             });
             state.broadcast_state();
@@ -1084,20 +1086,17 @@ async fn handle_agent_message(state: &AppState, agent_id: &str, text: &str) -> a
         AgentToServer::UpgradeLog {
             upgrade_id,
             stream,
-            seq: _,
+            seq,
             data,
         } => {
             let bytes = BASE64.decode(data)?;
             let text = String::from_utf8_lossy(&bytes).into_owned();
-            let data = if matches!(stream, LogStream::Stderr) {
-                format!("[{agent_id} stderr] {text}")
-            } else {
-                format!("[{agent_id}] {text}")
-            };
             let _ = state.ui_tx.send(UiMessage::UpgradeLog {
                 agent_id: agent_id.to_owned(),
                 upgrade_id,
-                data,
+                stream: Some(stream),
+                seq: Some(seq),
+                data: text,
             });
         }
     }
