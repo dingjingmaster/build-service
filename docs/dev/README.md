@@ -22,3 +22,5 @@
 | 3 | 2026-06-26 | L2 | task | [3-task-build-delete.md](3-task-build-delete.md) | 已完成 | Builds 多选删除 server 源码包和 build 记录。 |
 | 4 | 2026-06-26 | L3 | task | [4-task-agent-terminal.md](4-task-agent-terminal.md) | 已完成 | Agent Web 终端，基于 PTY 和 WebSocket 转发输入输出。 |
 | 5 | 2026-06-26 | L3 | task | [5-task-linux-packaging.md](5-task-linux-packaging.md) | 已完成 | deb、rpm、Gentoo emerge overlay 打包入口。 |
+| 6 | 2026-06-26 | L3 | task | [6-task-agent-package-upgrade.md](6-task-agent-package-upgrade.md) | 已完成 | Server 推送 deb/rpm/Gentoo overlay 包，agent 校验并通过系统包管理器升级。 |
+| 7 | 2026-06-26 | L2 | task | [7-task-web-ui-tabs.md](7-task-web-ui-tabs.md) | 已完成 | Web UI 拆分 Builds 和 Upgrades 两个 tab，编译和升级功能分区显示。 |

@@ -16,6 +16,7 @@
 | HTTP/WebSocket | axum、tokio、tokio-tungstenite | server API/UI 和 agent WS client | WebSocket 消息为 JSON text |
 | 持久化 | rusqlite + SQLite | build/run 元数据 | 日志和源码包放文件系统 |
 | 解包 | tar、flate2、zip | `tar.gz`/`zip` source archive | 校验顶层唯一目录和路径安全 |
+| 校验 | sha2 | 远程升级包 sha256 校验 | server 上传时计算，agent 下载后复核 |
 | PTY | portable-pty | Agent 交互式 Web 终端 | server 只转发，PTY 在 agent 本机创建 |
 | Linux 打包 | dpkg-deb、rpmbuild、Portage ebuild overlay | 生成 deb/rpm/Gentoo emerge 包定义 | 输出到 `target/package/` |
 
@@ -41,11 +42,15 @@
   - Agent 通过 HTTP 下载源码包。
   - Agent 通过 WebSocket 回传状态和日志。
   - Web terminal 通过 browser-server WebSocket 和 server-agent WebSocket 双跳转发输入输出。
+- Web UI：
+  - Builds tab 显示编译主流程：Submit Build、Runs、Builds、Agents、Run Log。
+  - Upgrades tab 显示远程升级流程：升级包上传、升级 agent 选择、升级日志。
 - 控制流：
   - server 根据 online agent 容量调度 queued run。
   - cancel/rerun 由 server API 触发。
   - run delete 由 server API 触发，server 通过 agent WebSocket 等待工作区删除确认后再删除 SQLite 记录。
   - terminal start/input/resize/close 由 browser WebSocket 触发，server 转发给在线 agent。
+  - upgrade start 由 browser 上传包触发，server 保存包并下发给在线 agent，agent 下载校验后调用系统包管理器安装并请求重启 service。
 - 外部依赖：
   - 无外部数据库或消息队列。
   - agent 执行脚本和 terminal shell 依赖本机 shell 和编译环境。
@@ -54,10 +59,12 @@
 
 | 接口/协议/ABI | 调用方 | 提供方 | 兼容约束 | 说明 |
 |---------------|--------|--------|----------|------|
-| `/api/agent/ws` | agent | server | JSON text WebSocket | hello、computer_name、heartbeat、run_start、run_log、run_finished、run_cancel、run_delete、run_deleted、terminal_start/input/resize/close、terminal_output/exit |
+| `/api/agent/ws` | agent | server | JSON text WebSocket | hello、computer_name、heartbeat、run_start、run_log、run_finished、run_cancel、run_delete、run_deleted、terminal_start/input/resize/close、terminal_output/exit、upgrade_start/status/log |
 | `/api/ui/ws` | browser | server | JSON text WebSocket | 推送完整 UI state 和日志增量 |
 | `/api/agents/{name}/terminal/ws` | browser | server | JSON text WebSocket | 为在线 agent 打开 PTY 终端会话并转发输入输出 |
 | `POST /api/builds` | browser | server | multipart form | 上传 source，传 target agents/labels |
+| `POST /api/upgrades` | browser | server | multipart form | 上传 deb/rpm/Gentoo overlay 包并推送给在线 agent |
+| `GET /api/upgrades/{id}/package` | agent | server | agent name/token header | 下载已下发升级包 |
 | `DELETE /api/builds/{id}` | browser | server | build with no runs only | 删除 server 侧 source 目录和 build 记录 |
 | `DELETE /api/agents/{name}` | browser | server | offline agent only | 从 server 运行时 agent 列表删除离线 agent |
 | `GET /api/runs/{id}/source` | agent | server | agent name/token header | 下载已分配源码包 |
@@ -78,21 +85,27 @@
   - Windows：`C:\ProgramData\buildsvc\buildsvc.ini`。
   - 开发 fallback：`./buildsvc.ini`。
   - 显式 `--config` 优先；未指定时系统服务路径优先，当前目录只作 fallback。
-  - 项目内开发样例：`configs/server.ini`、`configs/agent.ini`。
+  - 项目内发布/打包样例：`configs/server.ini`、`configs/agent.ini`。
+  - 项目内本地测试样例：`configs/server.test.ini`、`configs/agent.test.ini`。
   - `server.agent_heartbeat_sec` 默认 5 秒，由 server 在 `hello_accepted` 中下发给 agent。
   - `server.agent_offline_after_sec` 默认 15 秒，超时后 server 将 agent 从在线表移除，Web UI 显示 `offline`。
   - `server.terminal_enabled` 默认 `false`；关闭时 Web UI 不能打开 agent 终端。
+  - `server.upgrade_enabled` 默认 `false`；关闭时 Web UI 不能推送远程包升级。
   - `agent.advertise_ip` 可选；多网卡或非标准网卡名机器建议显式配置。
   - 未配置 `agent.advertise_ip` 时，agent 枚举本机网卡，优先选择有线/无线物理网卡地址，并过滤 lo/docker/veth/tun/bridge 等虚拟接口。
   - `agent.terminal_enabled` 默认 `false`；打开后 agent hello 上报终端能力。
   - `agent.terminal_shell` 可选；未配置时 Linux/macOS 使用 `SHELL` 或 `/bin/sh`，Windows 使用 `COMSPEC` 或 `cmd.exe`。
   - `agent.terminal_work_dir` 默认 `<agent_work_dir>/terminal`。
   - `agent.terminal_max_sessions` 默认 1。
+  - `agent.upgrade_enabled` 默认 `false`；打开后 agent hello 上报升级能力并可执行远程包升级。
+  - `agent.upgrade_work_dir` 默认 `<agent_work_dir>/upgrades`。
 - 持久化数据：
   - SQLite：`<server_data_dir>/buildsvc.db`。
   - 源码包：`<server_data_dir>/sources/<build_id>/source.*`。
   - 日志：`<server_data_dir>/logs/<run_id>.log`。
   - agent 工作目录：`<agent_work_dir>/runs/<run_id>/...`。
+  - server 侧升级包：`<server_data_dir>/upgrades/<upgrade_id>/...`。
+  - agent 侧升级包：`<agent_work_dir>/upgrades/<upgrade_id>/...`。
   - 删除 build 时，如果该 build 下无 run 记录，server 删除 `<server_data_dir>/sources/<build_id>` 和 `builds` 表记录。
   - 删除 run 时，agent 删除 `<agent_work_dir>/runs/<run_id>`，server 删除 `runs` 表记录和 `<server_data_dir>/logs/<run_id>.log`。
   - terminal session 当前不持久化命令记录和输出日志。
@@ -120,6 +133,7 @@
 | 协议 | WebSocket JSON 兼容和坏消息处理 | `cargo check`、人工审查错误路径 | docs/dev/1-plan-buildsvc-mvp.md |
 | 权限/系统调用 | agent 运行用户脚本、PTY shell 并终止进程组/终端会话 | Linux 编译验证；Windows/macOS 需后续实机验证 | docs/dev/1-plan-buildsvc-mvp.md |
 | Web 终端 | 键盘输入、resize、关闭会话和断线清理 | 本地 server/agent PTY smoke；Windows/macOS 需实机补测 | docs/dev/4-task-agent-terminal.md |
+| 远程升级 | 系统包安装权限、配置文件保护、service 重启、升级过程中 WebSocket 断开 | Linux 编译验证；deb/rpm/Gentoo 需目标系统实机验证 | docs/dev/6-task-agent-package-upgrade.md |
 | 文件系统 | archive 路径穿越和顶层目录约束 | archive 单元测试 | docs/dev/1-plan-buildsvc-mvp.md |
 | 数据保留 | 日志保留和运行中任务重启恢复 | storage 测试和人工审查 | docs/dev/1-plan-buildsvc-mvp.md |
 
@@ -141,7 +155,7 @@
   - Windows/macOS 执行器需实机补测。
 - 最小人工验证步骤：
   - 准备 server/agent 两份 INI 配置。
-  - 启动 `buildsvc --config configs/server.ini` 和 `buildsvc --config configs/agent.ini`。
+  - 本地测试可启动 `buildsvc --config configs/server.test.ini` 和 `buildsvc --config configs/agent.test.ini`。
   - 上传包含顶层目录和 `run-build.sh` 的 `tar.gz`。
   - 在 Web UI 确认 agent online、run success、日志实时展示。
   - 已验证 run：`run_d27d216d7ddf4394a94789f90b1a546b`，日志包含 `smoke-start` 和 `smoke-ok`。
@@ -155,6 +169,7 @@
   - Gentoo：`target/package/buildsvc-<version>-gentoo-overlay.tar.gz`，包含 `app-admin/buildsvc` ebuild overlay，可通过 `PORTDIR_OVERLAY=<overlay> emerge -av app-admin/buildsvc` 使用。
   - Gentoo ebuild 默认使用当前稳定架构 keyword（如 `amd64`、`arm64`）；如需 unstable keyword，可通过 `GENTOO_KEYWORDS='~amd64' make emerge` 覆盖。
 - 安装/部署方式：可将二进制和 INI 配置手动放到目标机器，也可使用 deb/rpm/Gentoo overlay 包安装；Linux 包内置 systemd unit。
+- 远程升级方式：在 server/agent 均启用 `upgrade_enabled=true` 后，通过 Web UI 上传 deb/rpm/Gentoo overlay 包并选择在线 agent；agent 下载校验后执行 apt/dpkg、dnf/yum/rpm 或 emerge 安装，并请求 `systemctl restart buildsvc`。
 - 配置变更：修改 INI 后重启对应进程。
 - 升级步骤：停止进程、替换二进制、启动进程。
 - 回滚步骤：停止进程、换回旧二进制、启动进程。

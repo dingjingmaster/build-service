@@ -83,13 +83,15 @@ Project-local examples:
 ```text
 configs/server.ini
 configs/agent.ini
+configs/server.test.ini
+configs/agent.test.ini
 ```
 
 Development startup:
 
 ```text
-buildsvc --config configs/server.ini
-buildsvc --config configs/agent.ini
+buildsvc --config configs/server.test.ini
+buildsvc --config configs/agent.test.ini
 ```
 
 Suggested defaults:

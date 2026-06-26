@@ -29,18 +29,51 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 18px;
       padding: 0 24px;
       border-bottom: 1px solid var(--line);
       background: var(--panel);
     }
     h1 { font-size: 18px; margin: 0; letter-spacing: 0; }
+    .tabs {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f8fafc;
+    }
+    button.tab-button {
+      min-height: 30px;
+      border: 0;
+      border-radius: 4px;
+      padding: 5px 14px;
+      background: transparent;
+      color: var(--muted);
+    }
+    button.tab-button.active {
+      background: var(--accent);
+      color: #fff;
+    }
     main {
+      padding: 18px;
+      min-height: calc(100vh - 56px);
+    }
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+    .main-grid {
       display: grid;
       grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
       gap: 18px;
-      padding: 18px;
       align-items: start;
-      min-height: calc(100vh - 56px);
+    }
+    .upgrade-grid {
+      display: grid;
+      grid-template-columns: minmax(320px, 420px) minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+      min-height: calc(100vh - 92px);
     }
     section {
       background: var(--panel);
@@ -64,7 +97,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
     }
     .two { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(540px, 1.4fr); gap: 18px; }
     label { display: block; font-weight: 600; margin-bottom: 5px; }
-    input[type="text"], input[type="file"] {
+    input[type="text"], input[type="file"], select {
       width: 100%;
       border: 1px solid var(--line);
       border-radius: 5px;
@@ -200,13 +233,28 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
     .run-agent { width: 62%; }
     .run-status { width: 30%; }
     .agent-computer { width: 20%; }
-    .agent-user { width: 13%; }
-    .agent-ip { width: 15%; }
-    .agent-os { width: 10%; }
-    .agent-arch { width: 10%; }
-    .agent-running { width: 9%; }
+    .agent-user { width: 10%; }
+    .agent-ip { width: 13%; }
+    .agent-os { width: 8%; }
+    .agent-arch { width: 8%; }
+    .agent-version { width: 10%; }
+    .agent-running { width: 8%; }
     .agent-status { width: 10%; }
     .agent-terminal { width: 13%; }
+    .upgrade-log {
+      flex: 1;
+      min-height: 520px;
+      height: auto;
+      margin: 0;
+      padding: 10px;
+      overflow: auto;
+      border-top: 1px solid var(--line);
+      background: #111827;
+      color: #e5e7eb;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
     .terminal-panel {
       position: fixed;
       inset: 72px 24px 24px 24px;
@@ -244,7 +292,8 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       overflow-wrap: anywhere;
     }
     @media (max-width: 920px) {
-      main { grid-template-columns: 1fr; }
+      header { flex-wrap: wrap; height: auto; min-height: 56px; padding: 10px 18px; }
+      .main-grid, .upgrade-grid { grid-template-columns: 1fr; }
       .two { grid-template-columns: 1fr; }
     }
   </style>
@@ -252,106 +301,149 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
 <body>
   <header>
     <h1>buildsvc</h1>
+    <nav class="tabs" aria-label="Views">
+      <button id="buildTab" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="buildPanel">Builds</button>
+      <button id="upgradeTab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="upgradePanel">Upgrades</button>
+    </nav>
     <div id="socketStatus" class="muted">connecting</div>
   </header>
   <main>
-    <div class="stack">
-      <section>
-        <h2>Submit Build</h2>
-        <form id="uploadForm" class="body stack">
-          <div>
-            <label for="source">Source archive</label>
-            <input id="source" name="source" type="file" accept=".zip,.tgz,.tar.gz" required>
-          </div>
-          <div>
-            <label>Agents</label>
-            <div id="agentChecks" class="agent-list"></div>
-          </div>
-          <div>
-            <label for="targetLabels">Labels</label>
-            <input id="targetLabels" name="target_labels" type="text" placeholder="linux,amd64">
-          </div>
-          <button type="submit">Start</button>
-          <div id="submitResult" class="muted"></div>
-        </form>
-      </section>
-      <section>
-        <h2>Runs</h2>
-        <div class="body">
-          <div class="table-scroll runs-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th class="run-select"><input id="selectAllRuns" type="checkbox"></th>
-                  <th class="run-agent">Computer / IP</th>
-                  <th class="run-status">Status</th>
-                </tr>
-              </thead>
-              <tbody id="runsBody"></tbody>
-            </table>
-          </div>
+    <div id="buildPanel" class="tab-panel active" role="tabpanel" aria-labelledby="buildTab">
+      <div class="main-grid">
+        <div class="stack">
+          <section>
+            <h2>Submit Build</h2>
+            <form id="uploadForm" class="body stack">
+              <div>
+                <label for="source">Source archive</label>
+                <input id="source" name="source" type="file" accept=".zip,.tgz,.tar.gz" required>
+              </div>
+              <div>
+                <label>Agents</label>
+                <div id="agentChecks" class="agent-list"></div>
+              </div>
+              <div>
+                <label for="targetLabels">Labels</label>
+                <input id="targetLabels" name="target_labels" type="text" placeholder="linux,amd64">
+              </div>
+              <button type="submit">Start</button>
+              <div id="submitResult" class="muted"></div>
+            </form>
+          </section>
+          <section>
+            <h2>Runs</h2>
+            <div class="body">
+              <div class="table-scroll runs-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th class="run-select"><input id="selectAllRuns" type="checkbox"></th>
+                      <th class="run-agent">Computer / IP</th>
+                      <th class="run-status">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="runsBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </section>
         </div>
-      </section>
+        <div class="workspace">
+          <div class="two">
+            <section>
+              <h2>Builds</h2>
+              <div class="body">
+                <div class="section-actions">
+                  <button id="deleteBuildsBtn" class="danger" type="button" disabled>Delete Source</button>
+                  <span id="selectedBuilds" class="muted"></span>
+                </div>
+                <div class="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th class="build-select"><input id="selectAllBuilds" type="checkbox"></th>
+                        <th class="build-source">Source</th>
+                        <th class="build-time">Uploaded</th>
+                        <th class="build-status">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody id="buildsBody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+            <section>
+              <h2>Agents</h2>
+              <div class="body">
+                <div class="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th class="agent-computer">Computer</th>
+                        <th class="agent-user">User</th>
+                        <th class="agent-ip">IP</th>
+                        <th class="agent-os">OS</th>
+                        <th class="agent-arch">Arch</th>
+                        <th class="agent-version">Version</th>
+                        <th class="agent-running">Tasks</th>
+                        <th class="agent-status">Status</th>
+                        <th class="agent-terminal">Terminal</th>
+                      </tr>
+                    </thead>
+                    <tbody id="agentsBody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+          </div>
+          <section class="log-section">
+            <h2>Run Log</h2>
+            <div class="body">
+              <div class="actions">
+                <button id="rerunBtn" class="secondary" type="button" disabled>Rerun</button>
+                <button id="cancelBtn" class="danger" type="button" disabled>Cancel</button>
+                <button id="deleteBtn" class="danger" type="button" disabled>Delete</button>
+                <span id="selectedRun" class="muted"></span>
+              </div>
+            </div>
+            <pre id="log"></pre>
+          </section>
+        </div>
+      </div>
     </div>
-    <div class="workspace">
-      <div class="two">
+    <div id="upgradePanel" class="tab-panel" role="tabpanel" aria-labelledby="upgradeTab">
+      <div class="upgrade-grid">
         <section>
-          <h2>Builds</h2>
-          <div class="body">
-            <div class="section-actions">
-              <button id="deleteBuildsBtn" class="danger" type="button" disabled>Delete Source</button>
-              <span id="selectedBuilds" class="muted"></span>
+          <h2>Upgrade Agents</h2>
+          <form id="upgradeForm" class="body stack">
+            <div>
+              <label for="packageKind">Package type</label>
+              <select id="packageKind" name="package_kind">
+                <option value="deb">deb</option>
+                <option value="rpm">rpm</option>
+                <option value="emerge">emerge</option>
+              </select>
             </div>
-            <div class="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th class="build-select"><input id="selectAllBuilds" type="checkbox"></th>
-                    <th class="build-source">Source</th>
-                    <th class="build-time">Uploaded</th>
-                    <th class="build-status">Status</th>
-                  </tr>
-                </thead>
-                <tbody id="buildsBody"></tbody>
-              </table>
+            <div>
+              <label for="upgradePackage">Package</label>
+              <input id="upgradePackage" name="package" type="file" accept=".deb,.rpm,.tgz,.tar.gz" required>
             </div>
-          </div>
+            <div>
+              <label>Agents</label>
+              <div id="upgradeAgentChecks" class="agent-list"></div>
+            </div>
+            <button type="submit">Push Upgrade</button>
+            <div id="upgradeResult" class="muted"></div>
+          </form>
         </section>
-        <section>
-          <h2>Agents</h2>
+        <section class="log-section">
+          <h2>Upgrade Log</h2>
           <div class="body">
-            <div class="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th class="agent-computer">Computer</th>
-                    <th class="agent-user">User</th>
-                    <th class="agent-ip">IP</th>
-                    <th class="agent-os">OS</th>
-                    <th class="agent-arch">Arch</th>
-                    <th class="agent-running">Tasks</th>
-                    <th class="agent-status">Status</th>
-                    <th class="agent-terminal">Terminal</th>
-                  </tr>
-                </thead>
-                <tbody id="agentsBody"></tbody>
-              </table>
-            </div>
+            <span class="muted">Package manager output and upgrade state appear here.</span>
           </div>
+          <pre id="upgradeLog" class="upgrade-log"></pre>
         </section>
       </div>
-      <section class="log-section">
-        <h2>Run Log</h2>
-        <div class="body">
-          <div class="actions">
-            <button id="rerunBtn" class="secondary" type="button" disabled>Rerun</button>
-            <button id="cancelBtn" class="danger" type="button" disabled>Cancel</button>
-            <button id="deleteBtn" class="danger" type="button" disabled>Delete</button>
-            <span id="selectedRun" class="muted"></span>
-          </div>
-        </div>
-        <pre id="log"></pre>
-      </section>
     </div>
   </main>
   <div id="terminalPanel" class="terminal-panel hidden">
@@ -371,11 +463,20 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
     let terminalSocket = null;
     let terminalBuffer = "";
     let terminalAgent = null;
+    let activeTab = "build";
 
     const socketStatus = document.getElementById("socketStatus");
+    const buildTab = document.getElementById("buildTab");
+    const upgradeTab = document.getElementById("upgradeTab");
+    const buildPanel = document.getElementById("buildPanel");
+    const upgradePanel = document.getElementById("upgradePanel");
     const uploadForm = document.getElementById("uploadForm");
     const submitResult = document.getElementById("submitResult");
     const agentChecks = document.getElementById("agentChecks");
+    const upgradeForm = document.getElementById("upgradeForm");
+    const upgradeAgentChecks = document.getElementById("upgradeAgentChecks");
+    const upgradeResult = document.getElementById("upgradeResult");
+    const upgradeLog = document.getElementById("upgradeLog");
     const agentsBody = document.getElementById("agentsBody");
     const buildsBody = document.getElementById("buildsBody");
     const selectAllBuilds = document.getElementById("selectAllBuilds");
@@ -393,6 +494,20 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
     const terminalStatus = document.getElementById("terminalStatus");
     const terminalOutput = document.getElementById("terminalOutput");
     const terminalCloseBtn = document.getElementById("terminalCloseBtn");
+
+    function activateTab(tab) {
+      activeTab = tab;
+      const buildActive = tab === "build";
+      buildTab.classList.toggle("active", buildActive);
+      upgradeTab.classList.toggle("active", !buildActive);
+      buildTab.setAttribute("aria-selected", buildActive ? "true" : "false");
+      upgradeTab.setAttribute("aria-selected", buildActive ? "false" : "true");
+      buildPanel.classList.toggle("active", buildActive);
+      upgradePanel.classList.toggle("active", !buildActive);
+    }
+
+    buildTab.addEventListener("click", () => activateTab("build"));
+    upgradeTab.addEventListener("click", () => activateTab("upgrade"));
 
     function status(value) {
       return `<span class="status ${escapeHtml(value)}">${escapeHtml(value)}</span>`;
@@ -446,6 +561,21 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
           </span>
         </label>`).join("");
 
+      upgradeAgentChecks.innerHTML = state.agents.map(agent => {
+        const enabled = agent.upgrade_enabled && agent.status !== "offline" && agent.running === 0;
+        const detail = agent.upgrade_status
+          ? `${agent.name} · ${display(agent.version)} · ${agent.upgrade_status}`
+          : `${agent.name} · ${display(agent.version)}`;
+        return `
+        <label class="agent-item">
+          <input type="checkbox" name="upgradeAgent" value="${escapeHtml(agent.name)}" ${enabled ? "" : "disabled"}>
+          <span>
+            <span>${escapeHtml(display(agent.computer_name))} ${status(agent.status)}</span>
+            <span class="labels">${escapeHtml(detail)}</span>
+          </span>
+        </label>`;
+      }).join("");
+
       agentsBody.innerHTML = state.agents.map(agent => `
         <tr>
           <td title="${escapeHtml(display(agent.computer_name))}">${escapeHtml(display(agent.computer_name))}</td>
@@ -453,8 +583,9 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
           <td title="${escapeHtml(display(agent.ip))}">${escapeHtml(display(agent.ip))}</td>
           <td>${escapeHtml(formatOs(agent.platform))}</td>
           <td>${escapeHtml(formatArch(agent.arch))}</td>
+          <td title="${escapeHtml(display(agent.version))}">${escapeHtml(display(agent.version))}</td>
           <td>${agent.running}/${agent.capacity}</td>
-          <td>${status(agent.status)}</td>
+          <td title="${escapeHtml(display(agent.upgrade_status))}">${status(agent.status)}</td>
           <td><button class="secondary small" type="button" data-terminal="${escapeHtml(agent.name)}" ${agent.terminal_enabled && agent.status !== "offline" ? "" : "disabled"}>Open</button></td>
         </tr>`).join("");
 
@@ -581,6 +712,43 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       state = await response.json();
       submitResult.textContent = "submitted";
       uploadForm.reset();
+      render();
+    });
+
+    function appendUpgradeLog(value) {
+      upgradeLog.textContent += value;
+      if (upgradeLog.textContent.length > 200000) {
+        upgradeLog.textContent = upgradeLog.textContent.slice(-160000);
+      }
+      upgradeLog.scrollTop = upgradeLog.scrollHeight;
+    }
+
+    upgradeForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      const form = new FormData();
+      const file = document.getElementById("upgradePackage").files[0];
+      if (!file) return;
+      const selected = Array.from(document.querySelectorAll("input[name='upgradeAgent']:checked"))
+        .map(input => input.value);
+      if (selected.length === 0) {
+        upgradeResult.textContent = "select at least one upgrade-enabled online agent";
+        return;
+      }
+      form.append("package", file);
+      form.append("package_kind", document.getElementById("packageKind").value);
+      form.append("target_agents", selected.join(","));
+      upgradeResult.textContent = "uploading";
+      const response = await fetch("/api/upgrades", { method: "POST", body: form });
+      if (!response.ok) {
+        upgradeResult.textContent = await response.text();
+        return;
+      }
+      const result = await response.json();
+      state = result.state;
+      const failed = result.failed.length > 0 ? ` · failed: ${result.failed.join("; ")}` : "";
+      upgradeResult.textContent = `${result.upgrade_id} sent to ${result.sent.join(", ")}${failed}`;
+      appendUpgradeLog(`[server] ${upgradeResult.textContent}\n`);
+      upgradeForm.reset();
       render();
     });
 
@@ -820,6 +988,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       if (event.key !== "Delete" || editing) {
         return;
       }
+      if (activeTab !== "build") return;
       if (selectedBuilds.size === 0 && selectedRuns.size === 0) return;
       event.preventDefault();
       if (selectedBuilds.size > 0) {
@@ -844,6 +1013,8 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
         } else if (message.type === "log" && message.run_id === selectedRun) {
           logEl.textContent += message.data;
           logEl.scrollTop = logEl.scrollHeight;
+        } else if (message.type === "upgrade_log") {
+          appendUpgradeLog(message.data);
         }
       };
     }

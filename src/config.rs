@@ -53,6 +53,7 @@ pub struct ServerConfig {
     pub kill_grace_sec: u64,
     pub max_upload_size_mb: u64,
     pub terminal_enabled: bool,
+    pub upgrade_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +72,8 @@ pub struct AgentConfig {
     pub terminal_shell: Option<String>,
     pub terminal_work_dir: PathBuf,
     pub terminal_max_sessions: usize,
+    pub upgrade_enabled: bool,
+    pub upgrade_work_dir: PathBuf,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -225,6 +228,7 @@ fn parse_server_config(
         kill_grace_sec: parse_u64(section, "kill_grace_sec", 10)?,
         max_upload_size_mb: parse_u64(section, "max_upload_size_mb", 2048)?,
         terminal_enabled: parse_bool(optional(section, "terminal_enabled").unwrap_or("false"))?,
+        upgrade_enabled: parse_bool(optional(section, "upgrade_enabled").unwrap_or("false"))?,
     })
 }
 
@@ -258,6 +262,10 @@ fn parse_agent_config(
             .map(PathBuf::from)
             .unwrap_or_else(|| work_dir.join("terminal")),
         terminal_max_sessions: parse_usize(section, "terminal_max_sessions", 1)?.max(1),
+        upgrade_enabled: parse_bool(optional(section, "upgrade_enabled").unwrap_or("false"))?,
+        upgrade_work_dir: optional(section, "upgrade_work_dir")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| work_dir.join("upgrades")),
     })
 }
 
@@ -412,7 +420,9 @@ mod tests {
 
         assert_eq!(config.core.role, Role::Server);
         assert_eq!(config.core.data_dir, PathBuf::from("./data"));
-        assert_eq!(config.server.unwrap().listen, "127.0.0.1:9090");
+        let server = config.server.unwrap();
+        assert_eq!(server.listen, "127.0.0.1:9090");
+        assert!(!server.upgrade_enabled);
         assert_eq!(
             config.server_agents["builder-1"].labels,
             vec!["linux", "amd64"]
@@ -447,5 +457,10 @@ mod tests {
             PathBuf::from("/tmp/buildsvc-agent/work/terminal")
         );
         assert_eq!(agent.terminal_max_sessions, 1);
+        assert!(!agent.upgrade_enabled);
+        assert_eq!(
+            agent.upgrade_work_dir,
+            PathBuf::from("/tmp/buildsvc-agent/work/upgrades")
+        );
     }
 }

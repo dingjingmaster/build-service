@@ -20,6 +20,7 @@ struct StorageInner {
     conn: Mutex<Connection>,
     sources_dir: PathBuf,
     logs_dir: PathBuf,
+    upgrades_dir: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -51,10 +52,13 @@ impl Storage {
     pub fn open(data_dir: PathBuf, db_path: PathBuf) -> anyhow::Result<Self> {
         let sources_dir = data_dir.join("sources");
         let logs_dir = data_dir.join("logs");
+        let upgrades_dir = data_dir.join("upgrades");
         let tmp_dir = data_dir.join("tmp");
         fs::create_dir_all(&sources_dir)
             .with_context(|| format!("create {}", sources_dir.display()))?;
         fs::create_dir_all(&logs_dir).with_context(|| format!("create {}", logs_dir.display()))?;
+        fs::create_dir_all(&upgrades_dir)
+            .with_context(|| format!("create {}", upgrades_dir.display()))?;
         fs::create_dir_all(&tmp_dir).with_context(|| format!("create {}", tmp_dir.display()))?;
         if let Some(parent) = db_path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
@@ -71,6 +75,7 @@ impl Storage {
                 conn: Mutex::new(conn),
                 sources_dir,
                 logs_dir,
+                upgrades_dir,
             }),
         })
     }
@@ -81,6 +86,10 @@ impl Storage {
 
     pub fn log_path(&self, run_id: &str) -> PathBuf {
         self.inner.logs_dir.join(format!("{run_id}.log"))
+    }
+
+    pub fn upgrades_dir(&self) -> &Path {
+        &self.inner.upgrades_dir
     }
 
     pub fn create_build(

@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     net::SocketAddr,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -20,6 +21,7 @@ use axum::{
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::{
     fs,
     io::AsyncWriteExt,
@@ -33,7 +35,10 @@ use tracing::{error, info, warn};
 use crate::{
     config::{CoreConfig, ServerAgentConfig, ServerConfig},
     ids,
-    protocol::{AgentToServer, AgentView, ArchiveFormat, ServerToAgent, UiMessage, UiState},
+    protocol::{
+        AgentToServer, AgentView, ArchiveFormat, LogStream, ServerToAgent, UiMessage, UiState,
+        UpgradePackageKind,
+    },
     storage::{NewRun, Storage, now_ts},
 };
 
@@ -55,12 +60,16 @@ struct RuntimeState {
     agent_metadata: HashMap<String, AgentMetadata>,
     pending_deletes: HashMap<String, PendingDelete>,
     terminal_sessions: HashMap<String, TerminalSession>,
+    upgrades: HashMap<String, UpgradePackage>,
 }
 
 struct AgentMetadata {
     computer_name: Option<String>,
     username: Option<String>,
     ip: Option<String>,
+    platform: Option<String>,
+    arch: Option<String>,
+    version: Option<String>,
 }
 
 struct AgentRuntime {
@@ -74,6 +83,8 @@ struct AgentRuntime {
     version: String,
     concurrency: usize,
     terminal_enabled: bool,
+    upgrade_enabled: bool,
+    upgrade_status: Option<String>,
     running: HashSet<String>,
     last_seen: i64,
     sender: mpsc::UnboundedSender<ServerToAgent>,
@@ -87,6 +98,20 @@ struct PendingDelete {
 struct TerminalSession {
     agent_name: String,
     sender: mpsc::UnboundedSender<TerminalUiMessage>,
+}
+
+#[derive(Clone)]
+struct UpgradePackage {
+    filename: String,
+    path: PathBuf,
+}
+
+#[derive(Debug, Serialize)]
+struct UpgradeResponse {
+    state: UiState,
+    upgrade_id: String,
+    sent: Vec<String>,
+    failed: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -141,6 +166,7 @@ pub async fn run(
             agent_metadata: HashMap::new(),
             pending_deletes: HashMap::new(),
             terminal_sessions: HashMap::new(),
+            upgrades: HashMap::new(),
         })),
         ui_tx,
     };
@@ -154,6 +180,8 @@ pub async fn run(
         .route("/api/state", get(api_state))
         .route("/api/builds", post(upload_build))
         .route("/api/builds/{build_id}", delete(delete_build))
+        .route("/api/upgrades", post(upload_upgrade))
+        .route("/api/upgrades/{upgrade_id}/package", get(download_upgrade))
         .route("/api/runs/{run_id}/source", get(download_source))
         .route("/api/runs/{run_id}/log", get(read_log))
         .route("/api/runs/{run_id}", delete(delete_run))
@@ -320,6 +348,142 @@ async fn upload_build(
     Ok(JsonResponse(state.ui_state()?))
 }
 
+async fn upload_upgrade(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> Result<JsonResponse<UpgradeResponse>, ApiError> {
+    if !state.server.upgrade_enabled {
+        return Err(anyhow::anyhow!("server upgrade is disabled").into());
+    }
+
+    let upgrade_id = ids::upgrade_id();
+    let upgrade_dir = state.storage.upgrades_dir().join(&upgrade_id);
+    fs::create_dir_all(&upgrade_dir).await?;
+
+    let mut package_kind = String::new();
+    let mut target_agents = String::new();
+    let mut package_filename = None;
+    let mut package_path = None;
+    let mut uploaded_size = 0_u64;
+    let mut hasher = Sha256::new();
+
+    while let Some(mut field) = multipart.next_field().await? {
+        let name = field.name().unwrap_or_default().to_owned();
+        match name.as_str() {
+            "package_kind" => {
+                package_kind = field.text().await.unwrap_or_default();
+            }
+            "target_agents" => {
+                target_agents = field.text().await.unwrap_or_default();
+            }
+            "package" => {
+                let filename = field
+                    .file_name()
+                    .map(ToOwned::to_owned)
+                    .context("missing package filename")?;
+                let safe_filename = sanitize_filename(&filename);
+                let path = upgrade_dir.join(&safe_filename);
+                let mut output = fs::File::create(&path).await?;
+                while let Some(chunk) = field.chunk().await? {
+                    uploaded_size += chunk.len() as u64;
+                    hasher.update(&chunk);
+                    output.write_all(&chunk).await?;
+                }
+                output.flush().await?;
+                package_filename = Some(safe_filename);
+                package_path = Some(path);
+            }
+            _ => {}
+        }
+    }
+
+    if uploaded_size == 0 {
+        return Err(anyhow::anyhow!("upgrade package is empty").into());
+    }
+    let kind: UpgradePackageKind = package_kind.parse()?;
+    let filename = package_filename.context("missing upgrade package")?;
+    validate_upgrade_filename(kind, &filename)?;
+    let path = package_path.context("missing upgrade package path")?;
+    let targets = split_csv(&target_agents);
+    if targets.is_empty() {
+        return Err(anyhow::anyhow!("no target agents selected").into());
+    }
+    let sha256 = format!("{:x}", hasher.finalize());
+    let package_url = format!(
+        "{}/api/upgrades/{}/package",
+        state.server.public_url.trim_end_matches('/'),
+        upgrade_id
+    );
+
+    let mut sent = Vec::new();
+    let mut failed = Vec::new();
+    {
+        let mut runtime = state
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+        runtime.upgrades.insert(
+            upgrade_id.clone(),
+            UpgradePackage {
+                filename: filename.clone(),
+                path,
+            },
+        );
+
+        for agent_name in targets {
+            let Some(agent) = runtime.agents.get_mut(&agent_name) else {
+                failed.push(format!("{agent_name}: offline"));
+                continue;
+            };
+            if !agent.upgrade_enabled {
+                failed.push(format!("{agent_name}: upgrade disabled"));
+                continue;
+            }
+            if agent.platform != "linux" {
+                failed.push(format!("{agent_name}: package upgrades are Linux-only"));
+                continue;
+            }
+            if !agent.running.is_empty() {
+                failed.push(format!("{agent_name}: active runs must finish first"));
+                continue;
+            }
+            match agent.sender.send(ServerToAgent::UpgradeStart {
+                upgrade_id: upgrade_id.clone(),
+                package_url: package_url.clone(),
+                package_kind: kind,
+                filename: filename.clone(),
+                sha256: sha256.clone(),
+            }) {
+                Ok(()) => {
+                    agent.upgrade_status = Some(format!("queued {upgrade_id}"));
+                    sent.push(agent_name);
+                }
+                Err(err) => failed.push(format!("{agent_name}: {err}")),
+            }
+        }
+    }
+
+    if sent.is_empty() {
+        return Err(anyhow::anyhow!(
+            "no agent accepted upgrade{}",
+            if failed.is_empty() {
+                String::new()
+            } else {
+                format!(": {}", failed.join("; "))
+            }
+        )
+        .into());
+    }
+
+    state.broadcast_state();
+    Ok(JsonResponse(UpgradeResponse {
+        state: state.ui_state()?,
+        upgrade_id,
+        sent,
+        failed,
+    }))
+}
+
 async fn download_source(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
@@ -340,6 +504,43 @@ async fn download_source(
             (
                 header::CONTENT_DISPOSITION,
                 "attachment; filename=\"source.archive\"",
+            ),
+        ],
+        Body::from(bytes),
+    )
+        .into_response())
+}
+
+async fn download_upgrade(
+    State(state): State<AppState>,
+    Path(upgrade_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let agent_name = header_value(&headers, "x-agent-name").context("missing x-agent-name")?;
+    let token = header_value(&headers, "x-agent-token").context("missing x-agent-token")?;
+    state.verify_agent_token(agent_name, token)?;
+
+    let package = {
+        let runtime = state
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+        runtime
+            .upgrades
+            .get(&upgrade_id)
+            .cloned()
+            .context("upgrade package not found")?
+    };
+    let bytes = fs::read(&package.path).await?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/octet-stream".to_owned()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!(
+                    "attachment; filename=\"{}\"",
+                    package.filename.replace(['"', '\\'], "_")
+                ),
             ),
         ],
         Body::from(bytes),
@@ -645,6 +846,7 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
         arch,
         concurrency,
         terminal_enabled,
+        upgrade_enabled,
         version,
     } = hello
     else {
@@ -666,11 +868,13 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
                 username: username.clone(),
                 ip: ip.clone(),
                 labels,
-                platform,
-                arch,
-                version,
+                platform: platform.clone(),
+                arch: arch.clone(),
+                version: version.clone(),
                 concurrency: concurrency.max(1),
                 terminal_enabled,
+                upgrade_enabled,
+                upgrade_status: None,
                 running: HashSet::new(),
                 last_seen: now_ts(),
                 sender: tx.clone(),
@@ -682,6 +886,9 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
                 computer_name: Some(computer_name),
                 username: Some(username),
                 ip: Some(ip),
+                platform: Some(platform),
+                arch: Some(arch),
+                version: Some(version),
             },
         );
     }
@@ -843,6 +1050,58 @@ async fn handle_agent_message(
                 &session_id,
                 TerminalUiMessage::Exit { exit_code, message },
             )?;
+        }
+        AgentToServer::UpgradeStatus {
+            upgrade_id,
+            state: upgrade_state,
+            message,
+        } => {
+            {
+                let mut runtime = state
+                    .runtime
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+                if let Some(agent) = runtime.agents.get_mut(agent_name) {
+                    agent.last_seen = now_ts();
+                    agent.upgrade_status = Some(match &message {
+                        Some(message) if !message.is_empty() => {
+                            format!("{upgrade_state}: {message}")
+                        }
+                        _ => upgrade_state.clone(),
+                    });
+                }
+            }
+            let log = match message {
+                Some(message) if !message.is_empty() => {
+                    format!("[{agent_name}] {upgrade_state}: {message}\n")
+                }
+                _ => format!("[{agent_name}] {upgrade_state}\n"),
+            };
+            let _ = state.ui_tx.send(UiMessage::UpgradeLog {
+                agent_name: agent_name.to_owned(),
+                upgrade_id,
+                data: log,
+            });
+            state.broadcast_state();
+        }
+        AgentToServer::UpgradeLog {
+            upgrade_id,
+            stream,
+            seq: _,
+            data,
+        } => {
+            let bytes = BASE64.decode(data)?;
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let data = if matches!(stream, LogStream::Stderr) {
+                format!("[{agent_name} stderr] {text}")
+            } else {
+                format!("[{agent_name}] {text}")
+            };
+            let _ = state.ui_tx.send(UiMessage::UpgradeLog {
+                agent_name: agent_name.to_owned(),
+                upgrade_id,
+                data,
+            });
         }
     }
     Ok(())
@@ -1009,6 +1268,9 @@ impl AppState {
             if agent.running.len() >= agent.concurrency {
                 continue;
             }
+            if upgrade_blocks_dispatch(agent.upgrade_status.as_deref()) {
+                continue;
+            }
 
             self.storage.mark_run_assigned(&run.id)?;
             agent.running.insert(run.id.clone());
@@ -1061,6 +1323,8 @@ impl AppState {
                     last_seen: Some(live.last_seen),
                     enabled: expected.enabled,
                     terminal_enabled: self.server.terminal_enabled && live.terminal_enabled,
+                    upgrade_enabled: self.server.upgrade_enabled && live.upgrade_enabled,
+                    upgrade_status: live.upgrade_status.clone(),
                 });
             } else {
                 agents.push(AgentView {
@@ -1077,10 +1341,19 @@ impl AppState {
                         .agent_metadata
                         .get(&expected.name)
                         .and_then(|metadata| metadata.ip.clone()),
+                    platform: runtime
+                        .agent_metadata
+                        .get(&expected.name)
+                        .and_then(|metadata| metadata.platform.clone()),
+                    arch: runtime
+                        .agent_metadata
+                        .get(&expected.name)
+                        .and_then(|metadata| metadata.arch.clone()),
+                    version: runtime
+                        .agent_metadata
+                        .get(&expected.name)
+                        .and_then(|metadata| metadata.version.clone()),
                     labels: expected.labels.clone(),
-                    platform: None,
-                    arch: None,
-                    version: None,
                     status: "offline".to_owned(),
                     running: 0,
                     capacity: 0,
@@ -1088,6 +1361,8 @@ impl AppState {
                     last_seen: None,
                     enabled: expected.enabled,
                     terminal_enabled: false,
+                    upgrade_enabled: false,
+                    upgrade_status: None,
                 });
             }
         }
@@ -1239,6 +1514,15 @@ fn is_terminal_run_status(status: &str) -> bool {
     matches!(status, "success" | "failed" | "canceled" | "lost")
 }
 
+fn upgrade_blocks_dispatch(status: Option<&str>) -> bool {
+    let Some(status) = status else {
+        return false;
+    };
+    !(status.starts_with("failed")
+        || status.starts_with("restart_requested")
+        || status.starts_with("success"))
+}
+
 fn split_csv(value: &str) -> Vec<String> {
     value
         .split(',')
@@ -1246,6 +1530,41 @@ fn split_csv(value: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+fn sanitize_filename(filename: &str) -> String {
+    let mut value = filename
+        .chars()
+        .map(|ch| match ch {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '.' | '_' | '-' => ch,
+            _ => '_',
+        })
+        .collect::<String>();
+    while value.starts_with('.') {
+        value.remove(0);
+    }
+    if value.is_empty() {
+        "package".to_owned()
+    } else {
+        value
+    }
+}
+
+fn validate_upgrade_filename(kind: UpgradePackageKind, filename: &str) -> anyhow::Result<()> {
+    let lower = filename.to_ascii_lowercase();
+    let valid = match kind {
+        UpgradePackageKind::Deb => lower.ends_with(".deb"),
+        UpgradePackageKind::Rpm => lower.ends_with(".rpm"),
+        UpgradePackageKind::Emerge => lower.ends_with(".tar.gz") || lower.ends_with(".tgz"),
+    };
+    if !valid {
+        bail!(
+            "upgrade package {} does not match selected kind {}",
+            filename,
+            kind
+        );
+    }
+    Ok(())
 }
 
 fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> anyhow::Result<&'a str> {

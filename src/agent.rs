@@ -13,12 +13,14 @@ use std::{
 
 use anyhow::{Context, bail};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use flate2::read::GzDecoder;
 use futures_util::{SinkExt, StreamExt};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use reqwest::Client;
+use sha2::{Digest, Sha256};
 use tokio::{
     fs,
-    io::{AsyncRead, AsyncReadExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, Command},
     sync::{Mutex, Semaphore, mpsc, oneshot},
     time,
@@ -29,7 +31,10 @@ use tracing::{info, warn};
 use crate::{
     archive,
     config::{AgentConfig, CoreConfig},
-    protocol::{AgentRunSnapshot, AgentToServer, ArchiveFormat, LogStream, ServerToAgent},
+    protocol::{
+        AgentRunSnapshot, AgentToServer, ArchiveFormat, LogStream, ServerToAgent,
+        UpgradePackageKind,
+    },
 };
 
 #[derive(Clone)]
@@ -39,6 +44,7 @@ struct AgentRuntime {
     sender: mpsc::UnboundedSender<AgentToServer>,
     runs: Arc<Mutex<HashMap<String, RunControl>>>,
     terminal_sessions: Arc<Mutex<HashMap<String, TerminalControl>>>,
+    upgrade: Arc<Mutex<Option<String>>>,
     semaphore: Arc<Semaphore>,
 }
 
@@ -66,6 +72,11 @@ pub async fn run(core: CoreConfig, config: AgentConfig) -> anyhow::Result<()> {
             .await
             .with_context(|| format!("create {}", config.terminal_work_dir.display()))?;
     }
+    if config.upgrade_enabled {
+        fs::create_dir_all(&config.upgrade_work_dir)
+            .await
+            .with_context(|| format!("create {}", config.upgrade_work_dir.display()))?;
+    }
     fs::create_dir_all(core.data_dir.join("tmp")).await.ok();
 
     loop {
@@ -89,6 +100,7 @@ async fn run_once(config: AgentConfig) -> anyhow::Result<()> {
         sender: out_tx.clone(),
         runs: Arc::new(Mutex::new(HashMap::new())),
         terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
+        upgrade: Arc::new(Mutex::new(None)),
         semaphore: Arc::new(Semaphore::new(config.concurrency.max(1))),
     };
 
@@ -103,6 +115,7 @@ async fn run_once(config: AgentConfig) -> anyhow::Result<()> {
         arch: std::env::consts::ARCH.to_owned(),
         concurrency: config.concurrency.max(1),
         terminal_enabled: config.terminal_enabled,
+        upgrade_enabled: config.upgrade_enabled,
         version: env!("CARGO_PKG_VERSION").to_owned(),
     })?;
 
@@ -300,6 +313,21 @@ mod tests {
         assert!(run_work_dir(work_dir, r"run\123").is_err());
         assert!(run_work_dir(work_dir, "").is_err());
     }
+
+    #[test]
+    fn validates_upgrade_package_filename() {
+        assert!(validate_upgrade_package_filename(UpgradePackageKind::Deb, "buildsvc.deb").is_ok());
+        assert!(validate_upgrade_package_filename(UpgradePackageKind::Rpm, "buildsvc.rpm").is_ok());
+        assert!(
+            validate_upgrade_package_filename(UpgradePackageKind::Emerge, "overlay.tar.gz").is_ok()
+        );
+        assert!(
+            validate_upgrade_package_filename(UpgradePackageKind::Deb, "../buildsvc.deb").is_err()
+        );
+        assert!(
+            validate_upgrade_package_filename(UpgradePackageKind::Deb, "buildsvc.rpm").is_err()
+        );
+    }
 }
 
 async fn heartbeat_loop(runtime: AgentRuntime, heartbeat_sec: u64) {
@@ -410,6 +438,23 @@ async fn handle_server_message(
         }
         ServerToAgent::TerminalClose { session_id } => {
             let _ = send_terminal_command(&runtime, &session_id, TerminalCommand::Close).await;
+        }
+        ServerToAgent::UpgradeStart {
+            upgrade_id,
+            package_url,
+            package_kind,
+            filename,
+            sha256,
+        } => {
+            start_upgrade(
+                runtime,
+                upgrade_id,
+                package_url,
+                package_kind,
+                filename,
+                sha256,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -774,6 +819,413 @@ async fn delete_run_workspace(runtime: &AgentRuntime, run_id: &str) -> anyhow::R
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(err) => Err(err).with_context(|| format!("remove {}", run_dir.display())),
     }
+}
+
+async fn start_upgrade(
+    runtime: AgentRuntime,
+    upgrade_id: String,
+    package_url: String,
+    package_kind: UpgradePackageKind,
+    filename: String,
+    sha256: String,
+) -> anyhow::Result<()> {
+    if let Err(err) = reserve_upgrade(&runtime, &upgrade_id).await {
+        send_upgrade_status(&runtime, &upgrade_id, "failed", Some(err.to_string()));
+        return Ok(());
+    }
+
+    let task_runtime = runtime.clone();
+    tokio::spawn(async move {
+        let result = execute_upgrade(
+            task_runtime.clone(),
+            upgrade_id.clone(),
+            package_url,
+            package_kind,
+            filename,
+            sha256,
+        )
+        .await;
+
+        if let Err(err) = result {
+            send_upgrade_status(&task_runtime, &upgrade_id, "failed", Some(err.to_string()));
+        }
+        let mut active = task_runtime.upgrade.lock().await;
+        if active.as_deref() == Some(upgrade_id.as_str()) {
+            *active = None;
+        }
+    });
+
+    Ok(())
+}
+
+async fn reserve_upgrade(runtime: &AgentRuntime, upgrade_id: &str) -> anyhow::Result<()> {
+    if !runtime.config.upgrade_enabled {
+        bail!("agent upgrade is disabled");
+    }
+    if std::env::consts::OS != "linux" {
+        bail!("package upgrades are supported only on Linux agents");
+    }
+    if !runtime.runs.lock().await.is_empty() {
+        bail!("agent has active runs");
+    }
+
+    let mut active = runtime.upgrade.lock().await;
+    if let Some(existing) = active.as_deref() {
+        bail!("upgrade already running: {existing}");
+    }
+    *active = Some(upgrade_id.to_owned());
+    Ok(())
+}
+
+async fn execute_upgrade(
+    runtime: AgentRuntime,
+    upgrade_id: String,
+    package_url: String,
+    package_kind: UpgradePackageKind,
+    filename: String,
+    sha256: String,
+) -> anyhow::Result<()> {
+    let filename = validate_upgrade_package_filename(package_kind, &filename)?;
+    let upgrade_dir = runtime.config.upgrade_work_dir.join(&upgrade_id);
+    match fs::remove_dir_all(&upgrade_dir).await {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err).with_context(|| format!("clear {}", upgrade_dir.display())),
+    }
+    fs::create_dir_all(&upgrade_dir)
+        .await
+        .with_context(|| format!("create {}", upgrade_dir.display()))?;
+
+    let package_path = upgrade_dir.join(&filename);
+    send_upgrade_status(&runtime, &upgrade_id, "downloading", Some(filename.clone()));
+    download_upgrade_package(&runtime, &package_url, &package_path, &sha256).await?;
+
+    send_upgrade_status(
+        &runtime,
+        &upgrade_id,
+        "installing",
+        Some(package_kind.to_string()),
+    );
+    install_upgrade_package(
+        &runtime,
+        &upgrade_id,
+        package_kind,
+        &package_path,
+        &upgrade_dir,
+    )
+    .await?;
+
+    send_upgrade_status(&runtime, &upgrade_id, "installed", None);
+    run_systemctl_daemon_reload(&runtime, &upgrade_id).await?;
+    send_upgrade_status(
+        &runtime,
+        &upgrade_id,
+        "restarting",
+        Some("buildsvc".to_owned()),
+    );
+    request_service_restart().await?;
+    send_upgrade_status(&runtime, &upgrade_id, "restart_requested", None);
+    Ok(())
+}
+
+async fn download_upgrade_package(
+    runtime: &AgentRuntime,
+    package_url: &str,
+    destination: &Path,
+    expected_sha256: &str,
+) -> anyhow::Result<()> {
+    let response = runtime
+        .client
+        .get(package_url)
+        .header("x-agent-name", &runtime.config.name)
+        .header("x-agent-token", &runtime.config.token)
+        .send()
+        .await?
+        .error_for_status()?;
+    let mut stream = response.bytes_stream();
+    let mut file = fs::File::create(destination)
+        .await
+        .with_context(|| format!("create {}", destination.display()))?;
+    let mut hasher = Sha256::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        hasher.update(&chunk);
+        file.write_all(&chunk).await?;
+    }
+    file.flush().await?;
+
+    let actual = format!("{:x}", hasher.finalize());
+    if !actual.eq_ignore_ascii_case(expected_sha256) {
+        bail!("sha256 mismatch: expected {expected_sha256}, got {actual}");
+    }
+    Ok(())
+}
+
+async fn install_upgrade_package(
+    runtime: &AgentRuntime,
+    upgrade_id: &str,
+    package_kind: UpgradePackageKind,
+    package_path: &Path,
+    upgrade_dir: &Path,
+) -> anyhow::Result<()> {
+    match package_kind {
+        UpgradePackageKind::Deb => install_deb(runtime, upgrade_id, package_path).await,
+        UpgradePackageKind::Rpm => install_rpm(runtime, upgrade_id, package_path).await,
+        UpgradePackageKind::Emerge => {
+            install_gentoo_overlay(runtime, upgrade_id, package_path, upgrade_dir).await
+        }
+    }
+}
+
+async fn install_deb(
+    runtime: &AgentRuntime,
+    upgrade_id: &str,
+    package_path: &Path,
+) -> anyhow::Result<()> {
+    if command_exists("apt-get") {
+        let mut command = Command::new("apt-get");
+        command
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .arg("install")
+            .arg("-y")
+            .arg("-o")
+            .arg("Dpkg::Options::=--force-confold")
+            .arg(package_path);
+        run_upgrade_command(runtime, upgrade_id, "apt-get install", command).await
+    } else if command_exists("dpkg") {
+        let mut command = Command::new("dpkg");
+        command.arg("--force-confold").arg("-i").arg(package_path);
+        run_upgrade_command(runtime, upgrade_id, "dpkg -i", command).await
+    } else {
+        bail!("neither apt-get nor dpkg was found")
+    }
+}
+
+async fn install_rpm(
+    runtime: &AgentRuntime,
+    upgrade_id: &str,
+    package_path: &Path,
+) -> anyhow::Result<()> {
+    if command_exists("dnf") {
+        let mut command = Command::new("dnf");
+        command.arg("install").arg("-y").arg(package_path);
+        run_upgrade_command(runtime, upgrade_id, "dnf install", command).await
+    } else if command_exists("yum") {
+        let mut command = Command::new("yum");
+        command.arg("install").arg("-y").arg(package_path);
+        run_upgrade_command(runtime, upgrade_id, "yum install", command).await
+    } else if command_exists("rpm") {
+        let mut command = Command::new("rpm");
+        command.arg("-Uvh").arg("--replacepkgs").arg(package_path);
+        run_upgrade_command(runtime, upgrade_id, "rpm -Uvh", command).await
+    } else {
+        bail!("dnf, yum, and rpm were not found")
+    }
+}
+
+async fn install_gentoo_overlay(
+    runtime: &AgentRuntime,
+    upgrade_id: &str,
+    package_path: &Path,
+    upgrade_dir: &Path,
+) -> anyhow::Result<()> {
+    if !command_exists("emerge") {
+        bail!("emerge was not found");
+    }
+
+    let extract_dir = upgrade_dir.join("gentoo");
+    let overlay = extract_gentoo_overlay(package_path, &extract_dir).await?;
+    let mut command = Command::new("emerge");
+    command
+        .env("PORTDIR_OVERLAY", &overlay)
+        .arg("app-admin/buildsvc");
+    run_upgrade_command(runtime, upgrade_id, "emerge app-admin/buildsvc", command).await
+}
+
+async fn extract_gentoo_overlay(
+    package_path: &Path,
+    destination: &Path,
+) -> anyhow::Result<PathBuf> {
+    let package_path = package_path.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        if destination.exists() {
+            std::fs::remove_dir_all(&destination)
+                .with_context(|| format!("clear {}", destination.display()))?;
+        }
+        std::fs::create_dir_all(&destination)
+            .with_context(|| format!("create {}", destination.display()))?;
+        let file = std::fs::File::open(&package_path)
+            .with_context(|| format!("open {}", package_path.display()))?;
+        let decoder = GzDecoder::new(file);
+        let mut archive = tar::Archive::new(decoder);
+        archive
+            .unpack(&destination)
+            .with_context(|| format!("extract {}", package_path.display()))?;
+        let overlay = destination.join("gentoo-overlay");
+        if !overlay.join("profiles").join("repo_name").is_file() {
+            bail!("gentoo overlay tarball does not contain gentoo-overlay/profiles/repo_name");
+        }
+        Ok(overlay)
+    })
+    .await?
+}
+
+async fn run_systemctl_daemon_reload(
+    runtime: &AgentRuntime,
+    upgrade_id: &str,
+) -> anyhow::Result<()> {
+    if !command_exists("systemctl") {
+        bail!("systemctl was not found");
+    }
+    let mut command = Command::new("systemctl");
+    command.arg("daemon-reload");
+    run_upgrade_command(runtime, upgrade_id, "systemctl daemon-reload", command).await
+}
+
+async fn request_service_restart() -> anyhow::Result<()> {
+    let mut command = Command::new("systemctl");
+    command
+        .arg("restart")
+        .arg("buildsvc")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command
+        .spawn()
+        .context("spawn systemctl restart buildsvc")?;
+    Ok(())
+}
+
+async fn run_upgrade_command(
+    runtime: &AgentRuntime,
+    upgrade_id: &str,
+    label: &str,
+    mut command: Command,
+) -> anyhow::Result<()> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().with_context(|| format!("spawn {label}"))?;
+    let seq = Arc::new(AtomicU64::new(1));
+
+    if let Some(stdout) = child.stdout.take() {
+        spawn_upgrade_log_reader(
+            runtime.sender.clone(),
+            upgrade_id.to_owned(),
+            LogStream::Stdout,
+            seq.clone(),
+            stdout,
+        );
+    }
+    if let Some(stderr) = child.stderr.take() {
+        spawn_upgrade_log_reader(
+            runtime.sender.clone(),
+            upgrade_id.to_owned(),
+            LogStream::Stderr,
+            seq,
+            stderr,
+        );
+    }
+
+    let status = child.wait().await?;
+    if !status.success() {
+        bail!("{label} exited with {}", status.code().unwrap_or(1));
+    }
+    Ok(())
+}
+
+fn spawn_upgrade_log_reader<R>(
+    sender: mpsc::UnboundedSender<AgentToServer>,
+    upgrade_id: String,
+    stream: LogStream,
+    seq: Arc<AtomicU64>,
+    mut reader: R,
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut buf = vec![0_u8; 8192];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    let data = BASE64.encode(&buf[..n]);
+                    let next_seq = seq.fetch_add(1, Ordering::Relaxed);
+                    if sender
+                        .send(AgentToServer::UpgradeLog {
+                            upgrade_id: upgrade_id.clone(),
+                            stream,
+                            seq: next_seq,
+                            data,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = sender.send(AgentToServer::UpgradeStatus {
+                        upgrade_id: upgrade_id.clone(),
+                        state: "failed".to_owned(),
+                        message: Some(format!("failed reading upgrade output: {err}")),
+                    });
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn send_upgrade_status(
+    runtime: &AgentRuntime,
+    upgrade_id: &str,
+    state: &str,
+    message: Option<String>,
+) {
+    let _ = runtime.sender.send(AgentToServer::UpgradeStatus {
+        upgrade_id: upgrade_id.to_owned(),
+        state: state.to_owned(),
+        message,
+    });
+}
+
+fn validate_upgrade_package_filename(
+    kind: UpgradePackageKind,
+    filename: &str,
+) -> anyhow::Result<String> {
+    if filename.is_empty()
+        || filename == "."
+        || filename == ".."
+        || filename.contains('/')
+        || filename.contains('\\')
+    {
+        bail!("invalid upgrade package filename");
+    }
+
+    let lower = filename.to_ascii_lowercase();
+    let valid = match kind {
+        UpgradePackageKind::Deb => lower.ends_with(".deb"),
+        UpgradePackageKind::Rpm => lower.ends_with(".rpm"),
+        UpgradePackageKind::Emerge => lower.ends_with(".tar.gz") || lower.ends_with(".tgz"),
+    };
+    if !valid {
+        bail!("upgrade package filename does not match kind {kind}");
+    }
+    Ok(filename.to_owned())
+}
+
+fn command_exists(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|dir| {
+                let path = dir.join(name);
+                path.is_file()
+            })
+        })
+        .unwrap_or(false)
 }
 
 fn run_work_dir(work_dir: &Path, run_id: &str) -> anyhow::Result<PathBuf> {

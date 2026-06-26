@@ -14,6 +14,8 @@ pub enum AgentToServer {
         arch: String,
         concurrency: usize,
         terminal_enabled: bool,
+        #[serde(default)]
+        upgrade_enabled: bool,
         version: String,
     },
     Heartbeat {
@@ -51,6 +53,17 @@ pub enum AgentToServer {
         session_id: String,
         exit_code: Option<i32>,
         message: Option<String>,
+    },
+    UpgradeStatus {
+        upgrade_id: String,
+        state: String,
+        message: Option<String>,
+    },
+    UpgradeLog {
+        upgrade_id: String,
+        stream: LogStream,
+        seq: u64,
+        data: String,
     },
 }
 
@@ -90,6 +103,13 @@ pub enum ServerToAgent {
     },
     TerminalClose {
         session_id: String,
+    },
+    UpgradeStart {
+        upgrade_id: String,
+        package_url: String,
+        package_kind: UpgradePackageKind,
+        filename: String,
+        sha256: String,
     },
 }
 
@@ -141,6 +161,43 @@ impl std::str::FromStr for ArchiveFormat {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UpgradePackageKind {
+    Deb,
+    Rpm,
+    Emerge,
+}
+
+impl UpgradePackageKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Deb => "deb",
+            Self::Rpm => "rpm",
+            Self::Emerge => "emerge",
+        }
+    }
+}
+
+impl std::fmt::Display for UpgradePackageKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for UpgradePackageKind {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "deb" => Ok(Self::Deb),
+            "rpm" => Ok(Self::Rpm),
+            "emerge" | "gentoo" => Ok(Self::Emerge),
+            other => anyhow::bail!("unsupported upgrade package kind: {other}"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentRunSnapshot {
     pub run_id: String,
@@ -166,8 +223,18 @@ impl std::fmt::Display for LogStream {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum UiMessage {
-    State { state: UiState },
-    Log { run_id: String, data: String },
+    State {
+        state: UiState,
+    },
+    Log {
+        run_id: String,
+        data: String,
+    },
+    UpgradeLog {
+        agent_name: String,
+        upgrade_id: String,
+        data: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -194,6 +261,8 @@ pub struct AgentView {
     pub last_seen: Option<i64>,
     pub enabled: bool,
     pub terminal_enabled: bool,
+    pub upgrade_enabled: bool,
+    pub upgrade_status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -237,5 +306,43 @@ mod tests {
             Some(ArchiveFormat::Zip)
         );
         assert_eq!(ArchiveFormat::from_filename("source.tar.xz"), None);
+    }
+
+    #[test]
+    fn parses_upgrade_package_kind() {
+        assert_eq!(
+            "deb".parse::<UpgradePackageKind>().unwrap(),
+            UpgradePackageKind::Deb
+        );
+        assert_eq!(
+            "gentoo".parse::<UpgradePackageKind>().unwrap(),
+            UpgradePackageKind::Emerge
+        );
+        assert!("zip".parse::<UpgradePackageKind>().is_err());
+    }
+
+    #[test]
+    fn hello_defaults_upgrade_capability() {
+        let message = r#"{
+            "type": "hello",
+            "name": "agent",
+            "token": "secret",
+            "computer_name": "host",
+            "username": "user",
+            "ip": "192.168.1.2",
+            "labels": ["linux"],
+            "platform": "linux",
+            "arch": "x86_64",
+            "concurrency": 1,
+            "terminal_enabled": false,
+            "version": "0.1.0"
+        }"#;
+        let AgentToServer::Hello {
+            upgrade_enabled, ..
+        } = serde_json::from_str(message).unwrap()
+        else {
+            panic!("expected hello");
+        };
+        assert!(!upgrade_enabled);
     }
 }
