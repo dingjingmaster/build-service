@@ -242,10 +242,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
     #log {
       flex: 1;
       min-height: 420px;
+      max-height: 900px;
       height: auto;
       margin: 0;
       padding: 12px;
-      overflow: auto;
+      overflow-y: auto;
+      overflow-x: hidden;
       border-top: 1px solid var(--line);
       background: #111827;
       color: #e5e7eb;
@@ -284,10 +286,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .upgrade-log {
       flex: 1;
       min-height: 520px;
+      max-height: 900px;
       height: auto;
       margin: 0;
       padding: 10px;
-      overflow: auto;
+      overflow-y: auto;
+      overflow-x: hidden;
       border-top: 1px solid var(--line);
       background: #111827;
       color: #e5e7eb;
