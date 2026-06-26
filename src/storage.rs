@@ -197,22 +197,20 @@ impl Storage {
     pub fn list_runs(&self) -> anyhow::Result<Vec<RunView>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, build_id, agent_name, labels_json, status, exit_code, created_at,
+            "SELECT id, build_id, agent_name, status, exit_code, created_at,
                     started_at, finished_at
              FROM runs ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map([], |row| {
-            let labels_json: String = row.get(3)?;
             Ok(RunView {
                 id: row.get(0)?,
                 build_id: row.get(1)?,
                 agent_name: row.get(2)?,
-                labels: parse_labels(&labels_json),
-                status: row.get(4)?,
-                exit_code: row.get(5)?,
-                created_at: row.get(6)?,
-                started_at: row.get(7)?,
-                finished_at: row.get(8)?,
+                status: row.get(3)?,
+                exit_code: row.get(4)?,
+                created_at: row.get(5)?,
+                started_at: row.get(6)?,
+                finished_at: row.get(7)?,
             })
         })?;
         collect_rows(rows)

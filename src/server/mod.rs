@@ -57,6 +57,7 @@ struct AppState {
 struct RuntimeState {
     agents: HashMap<String, AgentRuntime>,
     expected_agents: BTreeMap<String, ServerAgentConfig>,
+    agent_tokens: HashMap<String, String>,
     agent_metadata: HashMap<String, AgentMetadata>,
     pending_deletes: HashMap<String, PendingDelete>,
     terminal_sessions: HashMap<String, TerminalSession>,
@@ -77,7 +78,6 @@ struct AgentRuntime {
     computer_name: String,
     username: String,
     ip: String,
-    labels: Vec<String>,
     platform: String,
     arch: String,
     version: String,
@@ -163,6 +163,7 @@ pub async fn run(
         runtime: Arc::new(Mutex::new(RuntimeState {
             agents: HashMap::new(),
             expected_agents: agents,
+            agent_tokens: HashMap::new(),
             agent_metadata: HashMap::new(),
             pending_deletes: HashMap::new(),
             terminal_sessions: HashMap::new(),
@@ -283,7 +284,6 @@ async fn upload_build(
     let mut archive_path = None;
     let mut uploaded_size = 0_u64;
     let mut target_agents = String::new();
-    let mut target_labels = String::new();
 
     while let Some(mut field) = multipart.next_field().await? {
         let name = field.name().unwrap_or_default().to_owned();
@@ -309,9 +309,6 @@ async fn upload_build(
             "target_agents" => {
                 target_agents = field.text().await.unwrap_or_default();
             }
-            "target_labels" => {
-                target_labels = field.text().await.unwrap_or_default();
-            }
             _ => {}
         }
     }
@@ -322,7 +319,7 @@ async fn upload_build(
     }
     let archive_format = archive_format.context("missing archive format")?;
     let archive_path = archive_path.context("missing archive path")?;
-    let selected = state.resolve_targets(&target_agents, &target_labels)?;
+    let selected = state.resolve_targets(&target_agents)?;
     if selected.is_empty() {
         return Err(anyhow::anyhow!("no target agents selected").into());
     }
@@ -332,7 +329,7 @@ async fn upload_build(
         .map(|agent| NewRun {
             id: ids::run_id(),
             agent_name: agent.name,
-            labels: agent.labels,
+            labels: Vec::new(),
             script_timeout_sec: state.server.script_timeout_sec,
         })
         .collect();
@@ -685,6 +682,7 @@ async fn delete_agent(
         if runtime.expected_agents.remove(&agent_name).is_none() {
             return Err(anyhow::anyhow!("agent {agent_name} not found").into());
         }
+        runtime.agent_tokens.remove(&agent_name);
         runtime.agent_metadata.remove(&agent_name);
     }
     state.broadcast_state();
@@ -841,7 +839,6 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
         computer_name,
         username,
         ip,
-        labels,
         platform,
         arch,
         concurrency,
@@ -852,7 +849,7 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
     else {
         bail!("first agent message must be hello");
     };
-    state.verify_agent_token(&name, &token)?;
+    state.accept_agent_token(&name, &token)?;
 
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerToAgent>();
     {
@@ -867,7 +864,6 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
                 computer_name: computer_name.clone(),
                 username: username.clone(),
                 ip: ip.clone(),
-                labels,
                 platform: platform.clone(),
                 arch: arch.clone(),
                 version: version.clone(),
@@ -1203,6 +1199,39 @@ async fn handle_ui_ws(state: AppState, socket: WebSocket) {
 }
 
 impl AppState {
+    fn accept_agent_token(&self, name: &str, token: &str) -> anyhow::Result<()> {
+        let token = token.trim();
+        if token.is_empty() {
+            bail!("agent {name} sent an empty token");
+        }
+
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+        let expected = runtime
+            .expected_agents
+            .entry(name.to_owned())
+            .or_insert_with(|| ServerAgentConfig {
+                name: name.to_owned(),
+                enabled: true,
+            });
+        if !expected.enabled {
+            bail!("agent {name} is disabled");
+        }
+
+        if let Some(existing) = runtime.agent_tokens.get(name) {
+            if existing != token {
+                bail!("invalid token for agent {name}");
+            }
+        } else {
+            runtime
+                .agent_tokens
+                .insert(name.to_owned(), token.to_owned());
+        }
+        Ok(())
+    }
+
     fn verify_agent_token(&self, name: &str, token: &str) -> anyhow::Result<()> {
         let runtime = self
             .runtime
@@ -1215,17 +1244,17 @@ impl AppState {
         if !expected.enabled {
             bail!("agent {name} is disabled");
         }
-        if expected.token != token {
+        let expected_token = runtime
+            .agent_tokens
+            .get(name)
+            .with_context(|| format!("agent {name} token is not registered"))?;
+        if expected_token != token.trim() {
             bail!("invalid token for agent {name}");
         }
         Ok(())
     }
 
-    fn resolve_targets(
-        &self,
-        target_agents: &str,
-        target_labels: &str,
-    ) -> anyhow::Result<Vec<ServerAgentConfig>> {
+    fn resolve_targets(&self, target_agents: &str) -> anyhow::Result<Vec<ServerAgentConfig>> {
         let runtime = self
             .runtime
             .lock()
@@ -1236,15 +1265,6 @@ impl AppState {
                 bail!("unknown target agent {name}");
             }
             selected.insert(name);
-        }
-
-        let labels = split_csv(target_labels);
-        if !labels.is_empty() {
-            for agent in runtime.expected_agents.values() {
-                if agent.enabled && labels.iter().all(|label| agent.labels.contains(label)) {
-                    selected.insert(agent.name.clone());
-                }
-            }
         }
 
         Ok(selected
@@ -1308,7 +1328,6 @@ impl AppState {
                     computer_name: Some(live.computer_name.clone()),
                     username: Some(live.username.clone()),
                     ip: Some(live.ip.clone()),
-                    labels: live.labels.clone(),
                     platform: Some(live.platform.clone()),
                     arch: Some(live.arch.clone()),
                     version: Some(live.version.clone()),
@@ -1353,7 +1372,6 @@ impl AppState {
                         .agent_metadata
                         .get(&expected.name)
                         .and_then(|metadata| metadata.version.clone()),
-                    labels: expected.labels.clone(),
                     status: "offline".to_owned(),
                     running: 0,
                     capacity: 0,

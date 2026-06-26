@@ -44,22 +44,73 @@ cargo build
 cargo test
 ```
 
-## Packaging
+## Packaging And Installation
 
-All package artifacts are written under `target/package/`.
+Linux package artifacts are written under `target/package/`. deb, rpm, and Gentoo packages install a systemd unit and automatically run `daemon-reload`, `enable`, and `restart` after install or upgrade. On uninstall, package scripts stop and disable the service, then reload systemd.
 
-### Debian / Ubuntu
+Generated packages install:
+
+- `/usr/bin/buildsvc`
+- `/etc/buildsvc/buildsvc.ini`
+- `/usr/lib/systemd/system/buildsvc.service`
+- `/usr/share/doc/buildsvc/examples/buildsvc.ini`
+- If present: `/usr/share/doc/buildsvc/examples/server.ini`
+- If present: `/usr/share/doc/buildsvc/examples/agent.ini`
+
+The `/etc/buildsvc/buildsvc.ini` package config is selected from non-empty `configs/buildsvc.ini` first, then falls back to `packaging/buildsvc.ini`.
+
+The default packaged `[core].role` is `agent`, so a typical agent host usually only needs edits to fields such as `server_url` and `name`. The agent token is generated on first start and saved to `<data_dir>/agent.token`.
+
+### Debian / Ubuntu / Linux Mint
 
 ```bash
 make deb
 sudo apt install ./target/package/buildsvc_*.deb
 ```
 
-### RPM
+Edit config and restart after installation:
+
+```bash
+sudoedit /etc/buildsvc/buildsvc.ini
+sudo systemctl restart buildsvc
+sudo systemctl status buildsvc
+```
+
+Upgrade and uninstall:
+
+```bash
+sudo apt install ./target/package/buildsvc_*.deb
+sudo apt remove buildsvc
+```
+
+### Fedora / RHEL / Rocky / AlmaLinux / openSUSE
 
 ```bash
 make rpm
 sudo dnf install ./target/package/buildsvc-*.rpm
+```
+
+Other rpm-based systems can use:
+
+```bash
+sudo yum localinstall ./target/package/buildsvc-*.rpm
+sudo zypper install ./target/package/buildsvc-*.rpm
+sudo rpm -Uvh ./target/package/buildsvc-*.rpm
+```
+
+Edit config and restart after installation:
+
+```bash
+sudoedit /etc/buildsvc/buildsvc.ini
+sudo systemctl restart buildsvc
+sudo systemctl status buildsvc
+```
+
+Upgrade and uninstall:
+
+```bash
+sudo dnf install ./target/package/buildsvc-*.rpm
+sudo dnf remove buildsvc
 ```
 
 ### Gentoo
@@ -69,18 +120,164 @@ make emerge
 sudo env PORTDIR_OVERLAY="$PWD/target/package/gentoo-overlay" emerge -av app-admin/buildsvc
 ```
 
-Generated packages install:
+`make emerge` generates:
 
-- `/usr/bin/buildsvc`
-- `/etc/buildsvc/buildsvc.ini`
-- `/usr/lib/systemd/system/buildsvc.service`
-- `/usr/share/doc/buildsvc/examples/server.ini`
-- `/usr/share/doc/buildsvc/examples/agent.ini`
+- `target/package/gentoo-overlay/`
+- `target/package/buildsvc-<version>-gentoo-overlay.tar.gz`
 
 Gentoo ebuilds default to a stable keyword for the host architecture, such as `amd64` or `arm64`. To generate an unstable keyword intentionally:
 
 ```bash
 GENTOO_KEYWORDS='~amd64' make emerge
+```
+
+Edit config and restart after installation:
+
+```bash
+sudoedit /etc/buildsvc/buildsvc.ini
+sudo systemctl restart buildsvc
+sudo systemctl status buildsvc
+```
+
+Uninstall:
+
+```bash
+sudo emerge -C app-admin/buildsvc
+```
+
+### Manual Linux Install
+
+For distributions that do not use the package formats above, install the binary directly:
+
+```bash
+make
+sudo install -Dm755 target/release/buildsvc /usr/local/bin/buildsvc
+sudo install -Dm644 configs/buildsvc.ini /etc/buildsvc/buildsvc.ini
+sudoedit /etc/buildsvc/buildsvc.ini
+/usr/local/bin/buildsvc
+```
+
+To run it at boot with systemd:
+
+```bash
+sudo tee /etc/systemd/system/buildsvc.service >/dev/null <<'EOF'
+[Unit]
+Description=buildsvc
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/buildsvc
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now buildsvc
+```
+
+### Manual Windows Install
+
+There is no native Windows package yet. A Windows agent can run `buildsvc.exe` directly. The default config path is `C:\ProgramData\buildsvc\buildsvc.ini`.
+
+Build on Windows:
+
+```powershell
+cargo build --release
+```
+
+Install an agent from an Administrator PowerShell:
+
+```powershell
+New-Item -ItemType Directory -Force "C:\Program Files\buildsvc", "C:\ProgramData\buildsvc" | Out-Null
+Copy-Item .\target\release\buildsvc.exe "C:\Program Files\buildsvc\buildsvc.exe" -Force
+@'
+[core]
+role = agent
+data_dir = C:\ProgramData\buildsvc\data
+log_level = info
+
+[agent]
+server_url = ws://SERVER_IP:8080/api/agent/ws
+name = windows-agent-1
+work_dir = C:\ProgramData\buildsvc\work
+concurrency = 1
+'@ | Set-Content -Encoding UTF8 "C:\ProgramData\buildsvc\buildsvc.ini"
+notepad "C:\ProgramData\buildsvc\buildsvc.ini"
+& "C:\Program Files\buildsvc\buildsvc.exe"
+```
+
+For dependency-free startup, use Task Scheduler to wrap the normal process:
+
+```powershell
+schtasks /Create /TN buildsvc /SC ONSTART /RL HIGHEST /RU SYSTEM /TR "`"C:\Program Files\buildsvc\buildsvc.exe`""
+schtasks /Run /TN buildsvc
+```
+
+Stop and uninstall:
+
+```powershell
+taskkill /IM buildsvc.exe /F
+schtasks /Delete /TN buildsvc /F
+Remove-Item "C:\Program Files\buildsvc" -Recurse -Force
+```
+
+### Manual macOS Install
+
+There is no native macOS package yet. A macOS agent can run the binary directly. The default config path is `/etc/buildsvc/buildsvc.ini`.
+
+Build and install on macOS:
+
+```bash
+cargo build --release
+sudo install -d /usr/local/bin /etc/buildsvc /var/lib/buildsvc
+sudo install -m 0755 target/release/buildsvc /usr/local/bin/buildsvc
+sudo install -m 0644 configs/buildsvc.ini /etc/buildsvc/buildsvc.ini
+sudoedit /etc/buildsvc/buildsvc.ini
+/usr/local/bin/buildsvc
+```
+
+To run it at boot with launchd:
+
+```bash
+sudo tee /Library/LaunchDaemons/com.local.buildsvc.plist >/dev/null <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.buildsvc</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/buildsvc</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/buildsvc.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/buildsvc.err</string>
+</dict>
+</plist>
+EOF
+
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.local.buildsvc.plist
+sudo launchctl enable system/com.local.buildsvc
+sudo launchctl kickstart -k system/com.local.buildsvc
+```
+
+Stop and uninstall:
+
+```bash
+sudo launchctl bootout system /Library/LaunchDaemons/com.local.buildsvc.plist
+sudo rm -f /Library/LaunchDaemons/com.local.buildsvc.plist
+sudo rm -f /usr/local/bin/buildsvc
 ```
 
 ## Quick Start
@@ -101,11 +298,26 @@ cargo run -- --config configs/agent.test.ini
 
 The Web UI address is controlled by `listen` and `public_url` in the server config. The test configs default to `http://127.0.0.1:18080`.
 
-`configs/server.ini` and `configs/agent.ini` are release/package configs and are installed as package examples. Use `configs/server.test.ini` and `configs/agent.test.ini` for local development.
+`configs/buildsvc.ini` is the release/package default config and is installed as a package example. Use `configs/server.test.ini` and `configs/agent.test.ini` for local development.
 
-Open the Web UI, use the Builds tab to upload a `.tar.gz` or `.zip` archive, choose target agents or labels, and watch the run state and logs.
+Open the Web UI, use the Builds tab to upload a `.tar.gz` or `.zip` archive, choose target agents, and watch the run state and logs.
 
 ## Service Mode
+
+The package includes a systemd unit. After installing or upgrading via deb, rpm, or the Gentoo overlay, package scripts automatically run:
+
+```bash
+systemctl daemon-reload
+systemctl enable buildsvc.service
+systemctl restart buildsvc.service
+```
+
+On uninstall, package scripts stop and disable the service, then reload systemd. Check service state and logs with:
+
+```bash
+sudo systemctl status buildsvc
+journalctl -u buildsvc -f
+```
 
 The packaged systemd unit runs without command-line arguments:
 
@@ -118,15 +330,6 @@ Default config discovery:
 - Linux/macOS: `/etc/buildsvc/buildsvc.ini`
 - Windows: `C:\ProgramData\buildsvc\buildsvc.ini`
 - Development fallback: `./buildsvc.ini`
-
-Systemd commands:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now buildsvc
-sudo systemctl status buildsvc
-journalctl -u buildsvc -f
-```
 
 To run server and agent on the same host, use two config files and either start one process manually with `--config` or create a second service unit.
 
@@ -207,8 +410,6 @@ terminal_enabled = false
 upgrade_enabled = false
 
 [agent.linux-a]
-token = replace-with-a-long-random-token
-labels = linux,amd64
 enabled = true
 ```
 
@@ -223,8 +424,6 @@ log_level = info
 [agent]
 server_url = ws://192.168.1.10:8080/api/agent/ws
 name = linux-a
-token = replace-with-a-long-random-token
-labels = linux,amd64
 work_dir = /var/lib/buildsvc-agent/work
 concurrency = 1
 upgrade_enabled = false
@@ -233,9 +432,8 @@ upgrade_enabled = false
 Important fields:
 
 - `public_url` must be reachable from agents, because agents download source archives from it.
-- `[agent.<name>]` on the server must match `[agent].name` on the agent.
-- `token` must match on both sides.
-- `labels` are used by the Web UI to select target agents.
+- `[agent.<name>]` on the server is optional, but when present it must match `[agent].name` on the agent.
+- Agents generate their own token and save it to `<data_dir>/agent.token`; the server records it when the agent connects.
 - `advertise_ip` can be set on multi-NIC machines when automatic IP detection is not what you want.
 - `terminal_enabled` must be enabled on both server and agent before the Web terminal can be opened.
 - `upgrade_enabled` must be enabled on both server and agent before remote package upgrades can run.
@@ -244,6 +442,6 @@ Important fields:
 ## Security Notes
 
 - The first version has no Web UI login. Run it only on a trusted LAN or behind your own access control.
-- Replace all sample `change-me-*` tokens with long random tokens.
+- Agent tokens are generated automatically and stored in `<data_dir>/agent.token`; keep that file private.
 - The Web terminal can execute commands on the agent machine. It is disabled by default and should stay disabled unless the network and server are trusted.
 - Remote upgrade can install system packages and restart services on the agent machine. It is disabled by default and should only be enabled on trusted networks and servers.

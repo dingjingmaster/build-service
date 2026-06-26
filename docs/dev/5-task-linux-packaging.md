@@ -16,12 +16,16 @@
   - `/usr/bin/buildsvc`
   - `/etc/buildsvc/buildsvc.ini`
   - `/usr/lib/systemd/system/buildsvc.service`
-  - `/usr/share/doc/buildsvc/examples/server.ini`
-  - `/usr/share/doc/buildsvc/examples/agent.ini`
+  - `/usr/share/doc/buildsvc/examples/buildsvc.ini`
+  - 如存在，附带 `/usr/share/doc/buildsvc/examples/server.ini`
+  - 如存在，附带 `/usr/share/doc/buildsvc/examples/agent.ini`
+- `/etc/buildsvc/buildsvc.ini` 配置来源优先级：非空 `configs/buildsvc.ini`，否则 `packaging/buildsvc.ini`。
+- 默认包配置 `[core].role = agent`，方便 agent 机器安装后只修改 server 地址、agent 名称、token 和 labels。
 - deb 使用 `dpkg-deb --build` 生成。
 - rpm 使用 `rpmbuild -bb` 生成。
 - Gentoo 使用本地 Portage overlay 形式生成 `app-admin/buildsvc` ebuild，并打包为 overlay tarball；本机有 `ebuild` 时生成 Manifest。
 - Gentoo ebuild 默认按当前架构生成稳定 keyword（如 `amd64`、`arm64`），避免自用本地 overlay 在稳定系统上被 `~amd64 keyword` mask；如需 unstable keyword，可用 `GENTOO_KEYWORDS='~amd64' make emerge` 覆盖。
+- deb/rpm/Gentoo 包安装或升级后自动执行 `systemctl daemon-reload`、`systemctl enable buildsvc.service`、`systemctl restart buildsvc.service`；卸载时自动停止、禁用并 reload systemd。
 
 ## 验证
 

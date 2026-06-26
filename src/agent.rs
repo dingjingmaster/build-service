@@ -27,6 +27,7 @@ use tokio::{
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use crate::{
     archive,
@@ -63,7 +64,11 @@ enum TerminalCommand {
     Close,
 }
 
-pub async fn run(core: CoreConfig, config: AgentConfig) -> anyhow::Result<()> {
+pub async fn run(core: CoreConfig, mut config: AgentConfig) -> anyhow::Result<()> {
+    fs::create_dir_all(&core.data_dir)
+        .await
+        .with_context(|| format!("create {}", core.data_dir.display()))?;
+    config.token = load_or_create_agent_token(&core.data_dir, &config.token).await?;
     fs::create_dir_all(&config.work_dir)
         .await
         .with_context(|| format!("create {}", config.work_dir.display()))?;
@@ -110,7 +115,6 @@ async fn run_once(config: AgentConfig) -> anyhow::Result<()> {
         computer_name: computer_name(&config.name),
         username: username(),
         ip: advertised_ip(&config),
-        labels: config.labels.clone(),
         platform: std::env::consts::OS.to_owned(),
         arch: std::env::consts::ARCH.to_owned(),
         concurrency: config.concurrency.max(1),
@@ -166,6 +170,73 @@ async fn run_once(config: AgentConfig) -> anyhow::Result<()> {
     writer.abort();
     close_all_terminals(runtime.clone()).await;
     cancel_all(runtime).await;
+    Ok(())
+}
+
+async fn load_or_create_agent_token(
+    data_dir: &Path,
+    configured_token: &str,
+) -> anyhow::Result<String> {
+    let configured_token = configured_token.trim();
+    if !configured_token.is_empty() {
+        return Ok(configured_token.to_owned());
+    }
+
+    let token_path = data_dir.join("agent.token");
+    let mut replace_empty_existing = false;
+    match fs::read_to_string(&token_path).await {
+        Ok(existing) => {
+            let existing = existing.trim();
+            if !existing.is_empty() {
+                return Ok(existing.to_owned());
+            }
+            replace_empty_existing = true;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err).with_context(|| format!("read {}", token_path.display()));
+        }
+    }
+
+    fs::create_dir_all(data_dir)
+        .await
+        .with_context(|| format!("create {}", data_dir.display()))?;
+    let token = format!("agent_{}", Uuid::new_v4().simple());
+    let tmp_path = data_dir.join("agent.token.tmp");
+    fs::write(&tmp_path, format!("{token}\n"))
+        .await
+        .with_context(|| format!("write {}", tmp_path.display()))?;
+    set_private_permissions(&tmp_path).await?;
+    if replace_empty_existing {
+        remove_empty_token_file(&token_path).await?;
+    }
+    fs::rename(&tmp_path, &token_path)
+        .await
+        .with_context(|| format!("install {}", token_path.display()))?;
+    set_private_permissions(&token_path).await?;
+    info!(path = %token_path.display(), "generated agent token");
+    Ok(token)
+}
+
+async fn remove_empty_token_file(path: &Path) -> anyhow::Result<()> {
+    match fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+#[cfg(unix)]
+async fn set_private_permissions(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .await
+        .with_context(|| format!("set permissions {}", path.display()))
+}
+
+#[cfg(not(unix))]
+async fn set_private_permissions(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 

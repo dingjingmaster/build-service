@@ -23,6 +23,7 @@
   - 可升级 agent 选择
   - Upgrade Log
 - Delete 快捷键仅在 Builds tab 生效，避免在升级页误删隐藏选择项。
+- Builds tab 中 Runs、Builds、Agents 表格不再按固定条数限制高度；页面整体滚动。Builds 和 Agents 处于同一网格行，section 高度自然对齐。
 
 ## 验证
 

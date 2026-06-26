@@ -62,7 +62,6 @@ pub struct AgentConfig {
     pub name: String,
     pub token: String,
     pub advertise_ip: Option<String>,
-    pub labels: Vec<String>,
     pub work_dir: PathBuf,
     pub concurrency: usize,
     pub heartbeat_sec: u64,
@@ -79,9 +78,6 @@ pub struct AgentConfig {
 #[derive(Clone, Debug, Serialize)]
 pub struct ServerAgentConfig {
     pub name: String,
-    #[serde(skip_serializing)]
-    pub token: String,
-    pub labels: Vec<String>,
     pub enabled: bool,
 }
 
@@ -141,14 +137,10 @@ impl AppConfig {
         for (section_name, section) in &ini.sections {
             if let Some(agent_name) = section_name.strip_prefix("agent.") {
                 let enabled = parse_bool(optional(section, "enabled").unwrap_or("true"))?;
-                let labels = parse_list(optional(section, "labels").unwrap_or(""));
-                let token = required(section, "token")?.to_owned();
                 server_agents.insert(
                     agent_name.to_owned(),
                     ServerAgentConfig {
                         name: agent_name.to_owned(),
-                        token,
-                        labels,
                         enabled,
                     },
                 );
@@ -236,11 +228,6 @@ fn parse_agent_config(
     core: &CoreConfig,
     section: &BTreeMap<String, String>,
 ) -> anyhow::Result<AgentConfig> {
-    let labels = parse_list(optional(section, "labels").unwrap_or(""));
-    if labels.is_empty() {
-        bail!("[agent].labels must not be empty");
-    }
-
     let work_dir = optional(section, "work_dir")
         .map(PathBuf::from)
         .unwrap_or_else(|| core.data_dir.join("work"));
@@ -248,9 +235,8 @@ fn parse_agent_config(
     Ok(AgentConfig {
         server_url: required(section, "server_url")?.to_owned(),
         name: required(section, "name")?.to_owned(),
-        token: required(section, "token")?.to_owned(),
+        token: optional(section, "token").unwrap_or("").to_owned(),
         advertise_ip: optional(section, "advertise_ip").map(ToOwned::to_owned),
-        labels,
         work_dir: work_dir.clone(),
         concurrency: parse_usize(section, "concurrency", 1)?.max(1),
         heartbeat_sec: parse_u64(section, "heartbeat_sec", 5)?,
@@ -315,15 +301,6 @@ fn parse_bool(value: &str) -> anyhow::Result<bool> {
         "false" | "no" | "0" | "off" => Ok(false),
         other => bail!("invalid boolean: {other}"),
     }
-}
-
-fn parse_list(value: &str) -> Vec<String> {
-    value
-        .split(',')
-        .map(str::trim)
-        .filter(|item| !item.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
 }
 
 impl Ini {
@@ -411,8 +388,6 @@ mod tests {
             listen = 127.0.0.1:9090
 
             [agent.builder-1]
-            token = secret
-            labels = linux, amd64
             enabled = yes
             "#,
         )
@@ -423,10 +398,7 @@ mod tests {
         let server = config.server.unwrap();
         assert_eq!(server.listen, "127.0.0.1:9090");
         assert!(!server.upgrade_enabled);
-        assert_eq!(
-            config.server_agents["builder-1"].labels,
-            vec!["linux", "amd64"]
-        );
+        assert!(config.server_agents["builder-1"].enabled);
     }
 
     #[test]
@@ -440,14 +412,13 @@ mod tests {
             [agent]
             server_url = ws://127.0.0.1:8080/api/agent/ws
             name = local
-            token = secret
-            labels = linux,amd64
             "#,
         )
         .unwrap();
 
         let agent = config.agent.unwrap();
         assert_eq!(agent.name, "local");
+        assert_eq!(agent.token, "");
         assert_eq!(agent.work_dir, PathBuf::from("/tmp/buildsvc-agent/work"));
         assert_eq!(agent.concurrency, 1);
         assert_eq!(agent.heartbeat_sec, 5);

@@ -62,7 +62,7 @@
 | `/api/agent/ws` | agent | server | JSON text WebSocket | hello、computer_name、heartbeat、run_start、run_log、run_finished、run_cancel、run_delete、run_deleted、terminal_start/input/resize/close、terminal_output/exit、upgrade_start/status/log |
 | `/api/ui/ws` | browser | server | JSON text WebSocket | 推送完整 UI state 和日志增量 |
 | `/api/agents/{name}/terminal/ws` | browser | server | JSON text WebSocket | 为在线 agent 打开 PTY 终端会话并转发输入输出 |
-| `POST /api/builds` | browser | server | multipart form | 上传 source，传 target agents/labels |
+| `POST /api/builds` | browser | server | multipart form | 上传 source，传 target agents |
 | `POST /api/upgrades` | browser | server | multipart form | 上传 deb/rpm/Gentoo overlay 包并推送给在线 agent |
 | `GET /api/upgrades/{id}/package` | agent | server | agent name/token header | 下载已下发升级包 |
 | `DELETE /api/builds/{id}` | browser | server | build with no runs only | 删除 server 侧 source 目录和 build 记录 |
@@ -77,7 +77,7 @@
 
 - 核心数据结构：
   - `builds`：build id、source name、archive format、source path、created_at、status。
-  - `runs`：run id、build id、agent name、labels、status、exit_code、timestamps、source path、archive format、timeout。
+  - `runs`：run id、build id、agent name、status、exit_code、timestamps、source path、archive format、timeout。
 - 配置文件/参数：
   - 支持 `-c <path>` / `--config <path>` 指定 INI 配置文件。
   - 不指定配置参数时自动发现默认配置。
@@ -85,7 +85,7 @@
   - Windows：`C:\ProgramData\buildsvc\buildsvc.ini`。
   - 开发 fallback：`./buildsvc.ini`。
   - 显式 `--config` 优先；未指定时系统服务路径优先，当前目录只作 fallback。
-  - 项目内发布/打包样例：`configs/server.ini`、`configs/agent.ini`。
+  - 项目内发布/打包默认配置：`configs/buildsvc.ini`。
   - 项目内本地测试样例：`configs/server.test.ini`、`configs/agent.test.ini`。
   - `server.agent_heartbeat_sec` 默认 5 秒，由 server 在 `hello_accepted` 中下发给 agent。
   - `server.agent_offline_after_sec` 默认 15 秒，超时后 server 将 agent 从在线表移除，Web UI 显示 `offline`。
@@ -113,11 +113,11 @@
   - `/usr/bin/buildsvc`。
   - `/etc/buildsvc/buildsvc.ini`。
   - `/usr/lib/systemd/system/buildsvc.service`。
-  - `/usr/share/doc/buildsvc/examples/server.ini` 和 `agent.ini`。
+  - `/usr/share/doc/buildsvc/examples/buildsvc.ini`，以及存在时的 `server.ini` 和 `agent.ini`。
 - 迁移/兼容规则：
   - 第一版没有 schema migration 框架，仅 `CREATE TABLE IF NOT EXISTS`。
 - 敏感信息处理：
-  - agent token 存在 INI 文件。
+  - agent token 由 agent 自动生成并保存到 `<agent_data_dir>/agent.token`。
   - UI 不显示 token。
 - Agent 状态：
   - agent hello 自动上报计算机名，优先读取 `COMPUTERNAME`、`HOSTNAME`，再读取 `/etc/hostname`，最后回退到 agent 配置名。
@@ -168,7 +168,7 @@
   - rpm：`target/package/buildsvc-<version>-1.<arch>.rpm`。
   - Gentoo：`target/package/buildsvc-<version>-gentoo-overlay.tar.gz`，包含 `app-admin/buildsvc` ebuild overlay，可通过 `PORTDIR_OVERLAY=<overlay> emerge -av app-admin/buildsvc` 使用。
   - Gentoo ebuild 默认使用当前稳定架构 keyword（如 `amd64`、`arm64`）；如需 unstable keyword，可通过 `GENTOO_KEYWORDS='~amd64' make emerge` 覆盖。
-- 安装/部署方式：可将二进制和 INI 配置手动放到目标机器，也可使用 deb/rpm/Gentoo overlay 包安装；Linux 包内置 systemd unit。
+- 安装/部署方式：可将二进制和 INI 配置手动放到目标机器，也可使用 deb/rpm/Gentoo overlay 包安装；Linux 包内置 systemd unit，包安装/升级后自动 daemon-reload、enable、restart，卸载时自动 stop、disable、daemon-reload。
 - 远程升级方式：在 server/agent 均启用 `upgrade_enabled=true` 后，通过 Web UI 上传 deb/rpm/Gentoo overlay 包并选择在线 agent；agent 下载校验后执行 apt/dpkg、dnf/yum/rpm 或 emerge 安装，并请求 `systemctl restart buildsvc`。
 - 配置变更：修改 INI 后重启对应进程。
 - 升级步骤：停止进程、替换二进制、启动进程。
@@ -182,7 +182,7 @@
   - run 日志：server data dir 下 `logs/<run_id>.log`。
 - 指标/告警：第一版无指标系统。
 - 常见故障：
-  - agent unknown/invalid token：检查 server `[agent.<name>]` 和 agent `[agent]` token。
+  - agent invalid token：同名 agent 在当前 server 生命周期内使用了不同 token；可确认 agent 数据目录是否变化，必要时删除离线 agent 或重启 server 让 agent 重新登记。
   - agent IP 显示为 `-`：检查机器是否有可识别的有线/无线网卡，或在 agent 配置中设置 `advertise_ip`。
   - run failed：查看 run log 和脚本退出码。
   - source download failed：检查 `server.public_url` 是否对 agent 可达。

@@ -24,3 +24,5 @@
 | 5 | 2026-06-26 | L3 | task | [5-task-linux-packaging.md](5-task-linux-packaging.md) | 已完成 | deb、rpm、Gentoo emerge overlay 打包入口。 |
 | 6 | 2026-06-26 | L3 | task | [6-task-agent-package-upgrade.md](6-task-agent-package-upgrade.md) | 已完成 | Server 推送 deb/rpm/Gentoo overlay 包，agent 校验并通过系统包管理器升级。 |
 | 7 | 2026-06-26 | L2 | task | [7-task-web-ui-tabs.md](7-task-web-ui-tabs.md) | 已完成 | Web UI 拆分 Builds 和 Upgrades 两个 tab，编译和升级功能分区显示。 |
+| 8 | 2026-06-26 | L2 | task | [8-task-package-systemd-hooks.md](8-task-package-systemd-hooks.md) | 已完成 | deb/rpm/Gentoo 包安装、升级和卸载时自动管理 buildsvc systemd service。 |
+| 9 | 2026-06-26 | L2 | task | [9-task-agent-token-autogen.md](9-task-agent-token-autogen.md) | 已完成 | 移除 agent labels 配置和手工 token 配置，agent 首次启动自动生成 token。 |

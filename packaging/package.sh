@@ -48,15 +48,35 @@ gentoo_keywords() {
     esac
 }
 
+package_config_src() {
+    if [ -s "$ROOT_DIR/configs/buildsvc.ini" ]; then
+        echo "$ROOT_DIR/configs/buildsvc.ini"
+    else
+        echo "$ROOT_DIR/packaging/buildsvc.ini"
+    fi
+}
+
+install_examples() {
+    dest="$1"
+    examples="$dest/usr/share/doc/buildsvc/examples"
+    mkdir -p "$examples"
+    install -Dm644 "$(package_config_src)" "$examples/buildsvc.ini"
+    if [ -f "$ROOT_DIR/configs/server.ini" ]; then
+        install -Dm644 "$ROOT_DIR/configs/server.ini" "$examples/server.ini"
+    fi
+    if [ -f "$ROOT_DIR/configs/agent.ini" ]; then
+        install -Dm644 "$ROOT_DIR/configs/agent.ini" "$examples/agent.ini"
+    fi
+}
+
 stage_root() {
     dest="$1"
     rm -rf "$dest"
     mkdir -p "$dest"
     install -Dm755 "$BIN" "$dest/usr/bin/buildsvc"
-    install -Dm644 "$ROOT_DIR/packaging/buildsvc.ini" "$dest/etc/buildsvc/buildsvc.ini"
+    install -Dm644 "$(package_config_src)" "$dest/etc/buildsvc/buildsvc.ini"
     install -Dm644 "$ROOT_DIR/packaging/buildsvc.service" "$dest/usr/lib/systemd/system/buildsvc.service"
-    install -Dm644 "$ROOT_DIR/configs/server.ini" "$dest/usr/share/doc/buildsvc/examples/server.ini"
-    install -Dm644 "$ROOT_DIR/configs/agent.ini" "$dest/usr/share/doc/buildsvc/examples/agent.ini"
+    install_examples "$dest"
 }
 
 build_deb() {
@@ -88,6 +108,57 @@ EOF
     cat > "$pkgdir/DEBIAN/conffiles" <<EOF
 /etc/buildsvc/buildsvc.ini
 EOF
+
+    cat > "$pkgdir/DEBIAN/postinst" <<'EOF'
+#!/bin/sh
+set -e
+
+case "$1" in
+    configure)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload >/dev/null 2>&1 || true
+            systemctl enable buildsvc.service >/dev/null 2>&1 || true
+            systemctl restart buildsvc.service >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+exit 0
+EOF
+
+    cat > "$pkgdir/DEBIAN/prerm" <<'EOF'
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|deconfigure)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl stop buildsvc.service >/dev/null 2>&1 || true
+            systemctl disable buildsvc.service >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+exit 0
+EOF
+
+    cat > "$pkgdir/DEBIAN/postrm" <<'EOF'
+#!/bin/sh
+set -e
+
+case "$1" in
+    remove|purge)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl disable buildsvc.service >/dev/null 2>&1 || true
+            systemctl daemon-reload >/dev/null 2>&1 || true
+        fi
+        ;;
+esac
+
+exit 0
+EOF
+
+    chmod 755 "$pkgdir/DEBIAN/postinst" "$pkgdir/DEBIAN/prerm" "$pkgdir/DEBIAN/postrm"
 
     out="$OUT_DIR/${NAME}_${VERSION}-${RELEASE}_${arch}.deb"
     dpkg-deb --root-owner-group --build "$pkgdir" "$out"
@@ -133,6 +204,24 @@ rm -rf %{buildroot}
 mkdir -p %{buildroot}
 cp -a . %{buildroot}
 
+%post
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || :
+    systemctl enable buildsvc.service >/dev/null 2>&1 || :
+    systemctl restart buildsvc.service >/dev/null 2>&1 || :
+fi
+
+%preun
+if [ "\$1" -eq 0 ] && command -v systemctl >/dev/null 2>&1; then
+    systemctl stop buildsvc.service >/dev/null 2>&1 || :
+    systemctl disable buildsvc.service >/dev/null 2>&1 || :
+fi
+
+%postun
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload >/dev/null 2>&1 || :
+fi
+
 %files
 %dir /etc/buildsvc
 %config(noreplace) /etc/buildsvc/buildsvc.ini
@@ -140,8 +229,7 @@ cp -a . %{buildroot}
 /usr/lib/systemd/system/buildsvc.service
 %dir /usr/share/doc/buildsvc
 %dir /usr/share/doc/buildsvc/examples
-%doc /usr/share/doc/buildsvc/examples/server.ini
-%doc /usr/share/doc/buildsvc/examples/agent.ini
+%doc /usr/share/doc/buildsvc/examples/*
 
 %changelog
 * Fri Jun 26 2026 buildsvc maintainers <root@localhost> - $VERSION-$RELEASE
@@ -161,10 +249,14 @@ build_emerge() {
     mkdir -p "$files" "$overlay/metadata" "$overlay/profiles"
 
     install -Dm755 "$BIN" "$files/buildsvc"
-    install -Dm644 "$ROOT_DIR/packaging/buildsvc.ini" "$files/buildsvc.ini"
+    install -Dm644 "$(package_config_src)" "$files/buildsvc.ini"
     install -Dm644 "$ROOT_DIR/packaging/buildsvc.service" "$files/buildsvc.service"
-    install -Dm644 "$ROOT_DIR/configs/server.ini" "$files/server.ini"
-    install -Dm644 "$ROOT_DIR/configs/agent.ini" "$files/agent.ini"
+    if [ -f "$ROOT_DIR/configs/server.ini" ]; then
+        install -Dm644 "$ROOT_DIR/configs/server.ini" "$files/server.ini"
+    fi
+    if [ -f "$ROOT_DIR/configs/agent.ini" ]; then
+        install -Dm644 "$ROOT_DIR/configs/agent.ini" "$files/agent.ini"
+    fi
 
     echo "buildsvc-local" > "$overlay/profiles/repo_name"
     cat > "$overlay/metadata/layout.conf" <<EOF
@@ -195,7 +287,34 @@ src_install() {
 	newins "\${FILESDIR}/buildsvc.ini" buildsvc.ini
 
 	systemd_dounit "\${FILESDIR}/buildsvc.service"
-	dodoc "\${FILESDIR}/server.ini" "\${FILESDIR}/agent.ini"
+	dodoc "\${FILESDIR}/buildsvc.ini"
+	if [[ -f "\${FILESDIR}/server.ini" ]]; then
+		dodoc "\${FILESDIR}/server.ini"
+	fi
+	if [[ -f "\${FILESDIR}/agent.ini" ]]; then
+		dodoc "\${FILESDIR}/agent.ini"
+	fi
+}
+
+pkg_postinst() {
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl daemon-reload >/dev/null 2>&1 || true
+		systemctl enable buildsvc.service >/dev/null 2>&1 || true
+		systemctl restart buildsvc.service >/dev/null 2>&1 || true
+	fi
+}
+
+pkg_prerm() {
+	if [[ -z \${REPLACED_BY_VERSION} ]] && command -v systemctl >/dev/null 2>&1; then
+		systemctl stop buildsvc.service >/dev/null 2>&1 || true
+		systemctl disable buildsvc.service >/dev/null 2>&1 || true
+	fi
+}
+
+pkg_postrm() {
+	if command -v systemctl >/dev/null 2>&1; then
+		systemctl daemon-reload >/dev/null 2>&1 || true
+	fi
 }
 EOF
 

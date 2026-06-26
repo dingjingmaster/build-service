@@ -66,7 +66,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       display: grid;
       grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
       gap: 18px;
-      align-items: start;
+      align-items: stretch;
     }
     .upgrade-grid {
       display: grid;
@@ -95,7 +95,19 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       grid-template-rows: auto minmax(420px, 1fr);
       min-height: calc(100vh - 92px);
     }
-    .two { display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(540px, 1.4fr); gap: 18px; }
+    .two {
+      display: grid;
+      grid-template-columns: minmax(0, 0.8fr) minmax(540px, 1.4fr);
+      gap: 18px;
+      align-items: stretch;
+    }
+    .two > section {
+      display: flex;
+      flex-direction: column;
+    }
+    .two > section > .body {
+      flex: 1;
+    }
     label { display: block; font-weight: 600; margin-bottom: 5px; }
     input[type="text"], input[type="file"], select {
       width: 100%;
@@ -138,12 +150,10 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       table-layout: fixed;
     }
     .table-scroll {
-      height: 229px;
       overflow: auto;
       border: 1px solid var(--line);
       border-radius: 5px;
     }
-    .runs-scroll { height: 419px; }
     .table-scroll table { border: 0; }
     .table-scroll thead th {
       position: sticky;
@@ -197,7 +207,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       align-items: center;
       gap: 8px;
     }
-    .labels { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .item-detail { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #log {
       flex: 1;
       min-height: 420px;
@@ -322,10 +332,6 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
                 <label>Agents</label>
                 <div id="agentChecks" class="agent-list"></div>
               </div>
-              <div>
-                <label for="targetLabels">Labels</label>
-                <input id="targetLabels" name="target_labels" type="text" placeholder="linux,amd64">
-              </div>
               <button type="submit">Start</button>
               <div id="submitResult" class="muted"></div>
             </form>
@@ -333,7 +339,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
           <section>
             <h2>Runs</h2>
             <div class="body">
-              <div class="table-scroll runs-scroll">
+              <div class="table-scroll">
                 <table>
                   <thead>
                     <tr>
@@ -551,13 +557,28 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       return ip === "-" ? computer : `${computer} / ${ip}`;
     }
 
+    function compactJoin(values) {
+      const visible = values.map(display).filter(value => value !== "-");
+      return visible.length > 0 ? visible.join(" · ") : "-";
+    }
+
+    function agentDetail(agent) {
+      return compactJoin([
+        agent.name,
+        agent.ip,
+        formatOs(agent.platform),
+        formatArch(agent.arch),
+        agent.version
+      ]);
+    }
+
     function render() {
       agentChecks.innerHTML = state.agents.map(agent => `
         <label class="agent-item">
           <input type="checkbox" name="agent" value="${escapeHtml(agent.name)}" ${agent.enabled ? "" : "disabled"}>
           <span>
             <span>${escapeHtml(display(agent.computer_name))} ${status(agent.status)}</span>
-            <span class="labels">${escapeHtml(agent.name)} · ${escapeHtml(agent.labels.join(","))}</span>
+            <span class="item-detail">${escapeHtml(agentDetail(agent))}</span>
           </span>
         </label>`).join("");
 
@@ -571,7 +592,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
           <input type="checkbox" name="upgradeAgent" value="${escapeHtml(agent.name)}" ${enabled ? "" : "disabled"}>
           <span>
             <span>${escapeHtml(display(agent.computer_name))} ${status(agent.status)}</span>
-            <span class="labels">${escapeHtml(detail)}</span>
+            <span class="item-detail">${escapeHtml(detail)}</span>
           </span>
         </label>`;
       }).join("");
@@ -702,7 +723,6 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
         .map(input => input.value);
       form.append("source", file);
       form.append("target_agents", selected.join(","));
-      form.append("target_labels", document.getElementById("targetLabels").value);
       submitResult.textContent = "uploading";
       const response = await fetch("/api/builds", { method: "POST", body: form });
       if (!response.ok) {

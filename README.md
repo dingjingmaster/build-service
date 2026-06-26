@@ -44,11 +44,24 @@ cargo build
 cargo test
 ```
 
-### 打包
+### 打包和安装
 
-所有包产物默认输出到 `target/package/`。
+所有 Linux 包产物默认输出到 `target/package/`。deb、rpm、Gentoo 包安装后会自动安装 systemd unit，并执行 `daemon-reload`、`enable`、`restart`。卸载时会自动停止、禁用 service 并 reload systemd。
 
-#### Debian / Ubuntu
+包内文件：
+
+- `/usr/bin/buildsvc`
+- `/etc/buildsvc/buildsvc.ini`
+- `/usr/lib/systemd/system/buildsvc.service`
+- `/usr/share/doc/buildsvc/examples/buildsvc.ini`
+- 如果存在：`/usr/share/doc/buildsvc/examples/server.ini`
+- 如果存在：`/usr/share/doc/buildsvc/examples/agent.ini`
+
+打包到 `/etc/buildsvc/buildsvc.ini` 的配置来源为：优先使用非空的 `configs/buildsvc.ini`，否则使用 `packaging/buildsvc.ini`。
+
+默认安装配置的 `[core].role` 是 `agent`，常规 agent 机器安装后通常只需要修改 `server_url`、`name` 等 agent 字段。agent token 会在首次启动时自动生成并保存到 `<data_dir>/agent.token`。
+
+#### Debian / Ubuntu / Linux Mint
 
 需要 `dpkg-deb`。
 
@@ -57,15 +70,22 @@ make deb
 sudo apt install ./target/package/buildsvc_*.deb
 ```
 
-包内文件：
+安装后修改配置并重启：
 
-- `/usr/bin/buildsvc`
-- `/etc/buildsvc/buildsvc.ini`
-- `/usr/lib/systemd/system/buildsvc.service`
-- `/usr/share/doc/buildsvc/examples/server.ini`
-- `/usr/share/doc/buildsvc/examples/agent.ini`
+```bash
+sudoedit /etc/buildsvc/buildsvc.ini
+sudo systemctl restart buildsvc
+sudo systemctl status buildsvc
+```
 
-#### RPM
+升级和卸载：
+
+```bash
+sudo apt install ./target/package/buildsvc_*.deb
+sudo apt remove buildsvc
+```
+
+#### Fedora / RHEL / Rocky / AlmaLinux / openSUSE
 
 需要 `rpmbuild`。
 
@@ -74,10 +94,27 @@ make rpm
 sudo dnf install ./target/package/buildsvc-*.rpm
 ```
 
-也可以在不使用 dnf 的系统上用：
+不同发行版也可以使用对应命令：
 
 ```bash
+sudo yum localinstall ./target/package/buildsvc-*.rpm
+sudo zypper install ./target/package/buildsvc-*.rpm
 sudo rpm -Uvh ./target/package/buildsvc-*.rpm
+```
+
+安装后修改配置并重启：
+
+```bash
+sudoedit /etc/buildsvc/buildsvc.ini
+sudo systemctl restart buildsvc
+sudo systemctl status buildsvc
+```
+
+升级和卸载：
+
+```bash
+sudo dnf install ./target/package/buildsvc-*.rpm
+sudo dnf remove buildsvc
 ```
 
 #### Gentoo emerge
@@ -107,6 +144,155 @@ sudo mkdir -p /etc/portage/package.accept_keywords
 echo 'app-admin/buildsvc ~amd64' | sudo tee /etc/portage/package.accept_keywords/buildsvc
 ```
 
+安装后修改配置并重启：
+
+```bash
+sudoedit /etc/buildsvc/buildsvc.ini
+sudo systemctl restart buildsvc
+sudo systemctl status buildsvc
+```
+
+卸载：
+
+```bash
+sudo emerge -C app-admin/buildsvc
+```
+
+#### Linux 手动安装
+
+如果目标发行版不使用上述包格式，可以直接安装二进制：
+
+```bash
+make
+sudo install -Dm755 target/release/buildsvc /usr/local/bin/buildsvc
+sudo install -Dm644 configs/buildsvc.ini /etc/buildsvc/buildsvc.ini
+sudoedit /etc/buildsvc/buildsvc.ini
+/usr/local/bin/buildsvc
+```
+
+如需 systemd 自启动，可创建 unit：
+
+```bash
+sudo tee /etc/systemd/system/buildsvc.service >/dev/null <<'EOF'
+[Unit]
+Description=buildsvc
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/buildsvc
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now buildsvc
+```
+
+#### Windows 手动安装
+
+当前没有 Windows 原生安装包。Windows agent 可以直接运行 `buildsvc.exe`，默认配置路径为 `C:\ProgramData\buildsvc\buildsvc.ini`。
+
+在 Windows 上构建：
+
+```powershell
+cargo build --release
+```
+
+以管理员 PowerShell 安装 agent：
+
+```powershell
+New-Item -ItemType Directory -Force "C:\Program Files\buildsvc", "C:\ProgramData\buildsvc" | Out-Null
+Copy-Item .\target\release\buildsvc.exe "C:\Program Files\buildsvc\buildsvc.exe" -Force
+@'
+[core]
+role = agent
+data_dir = C:\ProgramData\buildsvc\data
+log_level = info
+
+[agent]
+server_url = ws://SERVER_IP:8080/api/agent/ws
+name = windows-agent-1
+work_dir = C:\ProgramData\buildsvc\work
+concurrency = 1
+'@ | Set-Content -Encoding UTF8 "C:\ProgramData\buildsvc\buildsvc.ini"
+notepad "C:\ProgramData\buildsvc\buildsvc.ini"
+& "C:\Program Files\buildsvc\buildsvc.exe"
+```
+
+如果需要无额外依赖的开机自启，可以用任务计划程序包装这个普通进程：
+
+```powershell
+schtasks /Create /TN buildsvc /SC ONSTART /RL HIGHEST /RU SYSTEM /TR "`"C:\Program Files\buildsvc\buildsvc.exe`""
+schtasks /Run /TN buildsvc
+```
+
+停止和卸载：
+
+```powershell
+taskkill /IM buildsvc.exe /F
+schtasks /Delete /TN buildsvc /F
+Remove-Item "C:\Program Files\buildsvc" -Recurse -Force
+```
+
+#### macOS 手动安装
+
+当前没有 macOS 原生安装包。macOS agent 可以直接运行二进制，默认配置路径为 `/etc/buildsvc/buildsvc.ini`。
+
+在 macOS 上构建并安装：
+
+```bash
+cargo build --release
+sudo install -d /usr/local/bin /etc/buildsvc /var/lib/buildsvc
+sudo install -m 0755 target/release/buildsvc /usr/local/bin/buildsvc
+sudo install -m 0644 configs/buildsvc.ini /etc/buildsvc/buildsvc.ini
+sudoedit /etc/buildsvc/buildsvc.ini
+/usr/local/bin/buildsvc
+```
+
+如需开机自启，可用 launchd：
+
+```bash
+sudo tee /Library/LaunchDaemons/com.local.buildsvc.plist >/dev/null <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.buildsvc</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/buildsvc</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>/var/log/buildsvc.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/buildsvc.err</string>
+</dict>
+</plist>
+EOF
+
+sudo launchctl bootstrap system /Library/LaunchDaemons/com.local.buildsvc.plist
+sudo launchctl enable system/com.local.buildsvc
+sudo launchctl kickstart -k system/com.local.buildsvc
+```
+
+停止和卸载：
+
+```bash
+sudo launchctl bootout system /Library/LaunchDaemons/com.local.buildsvc.plist
+sudo rm -f /Library/LaunchDaemons/com.local.buildsvc.plist
+sudo rm -f /usr/local/bin/buildsvc
+```
+
 ### 快速启动
 
 开发调试时可以用项目内的两份测试配置：
@@ -125,17 +311,23 @@ cargo run -- --config configs/agent.test.ini
 
 Web UI 地址由 server 配置中的 `listen` 和 `public_url` 决定。测试配置默认使用 `http://127.0.0.1:18080`。
 
-`configs/server.ini` 和 `configs/agent.ini` 是发布/打包用配置，会作为示例配置打进 Linux 包；本地调试优先使用 `configs/server.test.ini` 和 `configs/agent.test.ini`。
+`configs/buildsvc.ini` 是发布/打包用默认配置，会作为示例配置打进 Linux 包；本地调试优先使用 `configs/server.test.ini` 和 `configs/agent.test.ini`。
 
-打开 Web UI 后，在 Builds tab 上传 `.tar.gz` 或 `.zip` 源码包，选择目标 agent 或 labels，server 会创建 run 并分发给在线 agent。
+打开 Web UI 后，在 Builds tab 上传 `.tar.gz` 或 `.zip` 源码包，勾选目标 agent，server 会创建 run 并分发给在线 agent。
 
 ### 作为 service 运行
 
-安装包内置 systemd unit：
+安装包内置 systemd unit。通过 deb/rpm/Gentoo overlay 安装或升级后，包脚本会自动执行：
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now buildsvc
+systemctl daemon-reload
+systemctl enable buildsvc.service
+systemctl restart buildsvc.service
+```
+
+卸载时包脚本会自动停止并禁用 service，然后 reload systemd。查看状态和日志：
+
+```bash
 sudo systemctl status buildsvc
 journalctl -u buildsvc -f
 ```
@@ -245,26 +437,22 @@ agent 解包后会进入源码根目录执行脚本：
 | `terminal_enabled` | 是否允许 Web UI 打开 agent 终端 | `false` |
 | `upgrade_enabled` | 是否允许 Web UI 推送升级包 | `false` |
 
-server 还需要为允许连接的 agent 配置独立 token：
+server 可选预置已知 agent，并控制是否允许其连接：
 
 ```ini
 [agent.local-linux]
-token = change-me-local-linux
-labels = linux,amd64,local
 enabled = true
 ```
 
-这里的 `local-linux` 必须与对应 agent 配置中的 `[agent].name` 一致。
+这里的 `local-linux` 必须与对应 agent 配置中的 `[agent].name` 一致。未预置的 agent 首次连接时会自动加入运行时列表，默认启用；agent token 由 agent 自动生成，server 在连接时登记并用于后续源码包/升级包下载校验。
 
 #### `[agent]`
 
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
 | `server_url` | server 的 agent WebSocket 地址，通常是 `ws://<server>/api/agent/ws` | 必填 |
-| `name` | agent 名称，需要匹配 server 的 `[agent.<name>]` | 必填 |
-| `token` | agent token，需要匹配 server 配置 | 必填 |
+| `name` | agent 唯一名称；如果 server 预置了 `[agent.<name>]`，需要与其匹配 | 必填 |
 | `advertise_ip` | agent 上报给 UI 的 IP。多网卡机器建议显式配置 | 自动探测 |
-| `labels` | agent 标签，用逗号分隔，上传任务时可按标签选择 | 必填 |
 | `work_dir` | agent 工作目录 | `<data_dir>/work` |
 | `concurrency` | agent 本机并发 run 数 | `1` |
 | `heartbeat_sec` | agent 本地心跳间隔；server 接受连接后会以下发值为准 | `5` |
@@ -295,8 +483,6 @@ terminal_enabled = false
 upgrade_enabled = false
 
 [agent.linux-a]
-token = replace-with-a-long-random-token
-labels = linux,amd64
 enabled = true
 ```
 
@@ -311,8 +497,6 @@ log_level = info
 [agent]
 server_url = ws://192.168.1.10:8080/api/agent/ws
 name = linux-a
-token = replace-with-a-long-random-token
-labels = linux,amd64
 work_dir = /var/lib/buildsvc-agent/work
 concurrency = 1
 upgrade_enabled = false
@@ -323,7 +507,7 @@ upgrade_enabled = false
 1. 启动 server。
 2. 启动一个或多个 agent，确认 Web UI 中 Agents 状态为 online。
 3. 准备包含顶层目录和固定构建脚本的 `.tar.gz` 或 `.zip`。
-4. 在 Web UI 的 Builds tab 上传源码包，并选择目标 agents 或 labels。
+4. 在 Web UI 的 Builds tab 上传源码包，并选择目标 agents。
 5. 在 Runs 中查看执行状态，在 Run Log 中查看实时日志。
 6. 如需清理，先删除对应 runs；build 没有关联 runs 后可删除源码包。
 7. 如启用了 Web 终端，可以从 Agents 区域打开目标机器终端执行命令。
@@ -332,7 +516,7 @@ upgrade_enabled = false
 ### 安全说明
 
 - 第一版 Web UI 无登录认证，建议只在可信局域网或受控网络内使用。
-- agent token 要使用足够长的随机值，不要使用示例里的 `change-me-*`。
+- agent token 由 agent 自动生成并保存在 `<data_dir>/agent.token`，不要把该文件暴露给不可信用户。
 - Web 终端等同于在 agent 机器上执行命令，默认关闭；仅在信任 server 和网络边界时启用。
 - 远程升级等同于允许 Web UI 在 agent 机器上安装系统包并重启 service，默认关闭；仅在可信网络和可信 server 上启用。
 - `public_url` 必须是 agent 可以访问的地址，不要只写 server 本机的 `127.0.0.1`，除非 agent 和 server 在同一台机器上。

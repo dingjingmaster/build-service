@@ -18,7 +18,7 @@
   - 启动时读取 INI 配置，根据 `role` 进入 server 或 agent。
   - 支持通过 `-c` / `--config` 指定配置文件；不指定时自动发现默认配置。
   - server 提供 Web UI，上传 `tar.gz`/`zip` 源码包。
-  - 用户按 agent 名或 labels 选择目标 agent。
+  - 用户按 agent 名选择目标 agent。
   - agent 通过 WebSocket 连接 server，启动时自动上报最新计算机名，接收 run，下载源码包，解包并执行固定脚本。
   - server 实时显示 agent 状态、run 状态、日志和退出码。
   - server 支持删除 offline agent。
@@ -51,7 +51,7 @@
 ```text
 1. server 启动，读取 INI，初始化 SQLite 和数据目录。
 2. agent 启动，读取 INI，通过 WebSocket hello/heartbeat 注册到 server。
-3. 用户在 Web UI 上传源码包，并选择 agent 名或 labels。
+3. 用户在 Web UI 上传源码包，并选择目标 agent。
 4. server 创建 build 和 runs，并向在线且有容量的 agent 下发 run_start。
 5. agent 下载源码包，解包顶层唯一目录，执行 run-build.sh 或 run-build.bat。
 6. agent 通过 WebSocket 回传日志、状态和最终退出码。
@@ -62,7 +62,7 @@
 ## 5. 产品规则
 
 - 权限规则：
-  - 每个 agent 独立 token。
+  - 每个 agent 自动生成并持久化独立 token。
   - Web UI 第一版不登录，仅适合可信局域网。
 - 状态流转：
   - 正常：`queued -> assigned -> preparing -> running -> success/failed`。
@@ -80,10 +80,10 @@
   - 压缩包顶层必须只有一个目录。
 - 用户可见行为：
   - 日志实时追加展示。
-  - agent 选择只基于 agent 名和 labels。
+  - agent 选择只基于 agent 名。
   - Agents 列表显示 agent 名、最新计算机名、状态和容量。
   - Agents 列表排序为在线 agent 优先，离线 agent 靠后，同组内按计算机名排序。
-  - offline agent 可从 server 运行时列表删除；删除后该 agent 不再显示，也不能继续用原 token 接入，直到 server 重启或重新加入配置。
+  - offline agent 可从 server 运行时列表删除；删除后该 agent 不再显示，下一次连接会重新登记 token 并出现在列表中。
   - Runs 列表支持多选、全选和 Delete 键删除；删除仅对已结束 run 生效。
   - 删除 run 时，server 必须先请求对应在线 agent 删除本地工作区；agent 确认成功后，server 才删除界面记录和 server 侧日志。
   - Builds 列表支持多选、全选和 Delete 键删除；删除仅清理 server 侧源码包和 build 记录，不触碰 agent 工作区。
