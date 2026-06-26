@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path as FsPath, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -105,6 +105,16 @@ struct TerminalSession {
 struct UpgradePackage {
     filename: String,
     path: PathBuf,
+    dir: PathBuf,
+    targets: HashSet<String>,
+    completed: HashSet<String>,
+    target_version: Option<String>,
+}
+
+struct UpgradeCleanup {
+    upgrade_id: String,
+    dir: PathBuf,
+    filename: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,6 +162,14 @@ pub async fn run(core: CoreConfig, server: ServerConfig) -> anyhow::Result<()> {
         );
     }
     storage.cleanup_old_logs(server.log_retention_days)?;
+    let cleaned_upgrades =
+        cleanup_untracked_upgrade_dirs(storage.upgrades_dir(), &HashSet::new()).await;
+    if cleaned_upgrades > 0 {
+        info!(
+            count = cleaned_upgrades,
+            "cleaned stale server upgrade packages"
+        );
+    }
 
     let (ui_tx, _) = broadcast::channel(256);
     let state = AppState {
@@ -350,6 +368,12 @@ async fn upload_upgrade(
         return Err(anyhow::anyhow!("server upgrade is disabled").into());
     }
 
+    let tracked = state.tracked_upgrade_ids()?;
+    let cleaned = cleanup_untracked_upgrade_dirs(state.storage.upgrades_dir(), &tracked).await;
+    if cleaned > 0 {
+        info!(count = cleaned, "cleaned untracked server upgrade packages");
+    }
+
     let upgrade_id = ids::upgrade_id();
     let upgrade_dir = state.storage.upgrades_dir().join(&upgrade_id);
     fs::create_dir_all(&upgrade_dir).await?;
@@ -392,15 +416,36 @@ async fn upload_upgrade(
     }
 
     if uploaded_size == 0 {
+        remove_upgrade_dir(&upgrade_id, &upgrade_dir).await;
         return Err(anyhow::anyhow!("upgrade package is empty").into());
     }
-    let kind: UpgradePackageKind = package_kind.parse()?;
-    let filename = package_filename.context("missing upgrade package")?;
-    validate_upgrade_filename(kind, &filename)?;
-    let path = package_path.context("missing upgrade package path")?;
+    let kind: UpgradePackageKind = match package_kind.parse() {
+        Ok(kind) => kind,
+        Err(err) => {
+            remove_upgrade_dir(&upgrade_id, &upgrade_dir).await;
+            return Err(err.into());
+        }
+    };
+    let Some(filename) = package_filename else {
+        remove_upgrade_dir(&upgrade_id, &upgrade_dir).await;
+        return Err(anyhow::anyhow!("missing upgrade package").into());
+    };
+    if let Err(err) = validate_upgrade_filename(kind, &filename) {
+        remove_upgrade_dir(&upgrade_id, &upgrade_dir).await;
+        return Err(err.into());
+    }
+    let Some(path) = package_path else {
+        remove_upgrade_dir(&upgrade_id, &upgrade_dir).await;
+        return Err(anyhow::anyhow!("missing upgrade package path").into());
+    };
     let targets = split_csv(&target_agents);
     if targets.is_empty() {
+        remove_upgrade_dir(&upgrade_id, &upgrade_dir).await;
         return Err(anyhow::anyhow!("no target agents selected").into());
+    }
+    let target_version = parse_upgrade_target_version(kind, &filename);
+    if target_version.is_none() {
+        warn!(%filename, kind = %kind, "failed to parse upgrade target version");
     }
     let sha256 = format!("{:x}", hasher.finalize());
     let package_url = format!(
@@ -411,6 +456,7 @@ async fn upload_upgrade(
 
     let mut sent = Vec::new();
     let mut failed = Vec::new();
+    let mut accepted_targets = HashSet::new();
     {
         let mut runtime = state
             .runtime
@@ -421,6 +467,10 @@ async fn upload_upgrade(
             UpgradePackage {
                 filename: filename.clone(),
                 path,
+                dir: upgrade_dir.clone(),
+                targets: HashSet::new(),
+                completed: HashSet::new(),
+                target_version,
             },
         );
 
@@ -450,14 +500,26 @@ async fn upload_upgrade(
             }) {
                 Ok(()) => {
                     agent.upgrade_status = Some(format!("queued {upgrade_id}"));
+                    accepted_targets.insert(agent_id.clone());
                     sent.push(agent_id);
                 }
                 Err(err) => failed.push(format!("{agent_id}: {err}")),
             }
         }
+        if let Some(package) = runtime.upgrades.get_mut(&upgrade_id) {
+            package.targets = accepted_targets;
+        }
     }
 
     if sent.is_empty() {
+        {
+            let mut runtime = state
+                .runtime
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+            runtime.upgrades.remove(&upgrade_id);
+        }
+        remove_upgrade_dir(&upgrade_id, &upgrade_dir).await;
         return Err(anyhow::anyhow!(
             "no agent accepted upgrade{}",
             if failed.is_empty() {
@@ -907,9 +969,13 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
                 ip: Some(ip),
                 platform: Some(platform),
                 arch: Some(arch),
-                version: Some(version),
+                version: Some(version.clone()),
             },
         );
+    }
+    let completed_upgrades = state.mark_agent_upgrades_completed_by_version(&agent_id, &version)?;
+    for cleanup in completed_upgrades {
+        cleanup_completed_upgrade(&state, cleanup).await;
     }
 
     tx.send(ServerToAgent::HelloAccepted {
@@ -1071,6 +1137,11 @@ async fn handle_agent_message(state: &AppState, agent_id: &str, text: &str) -> a
             state: upgrade_state,
             message,
         } => {
+            let completed_upgrade = if is_upgrade_completion_status(&upgrade_state) {
+                state.mark_upgrade_target_completed(&upgrade_id, agent_id)?
+            } else {
+                None
+            };
             {
                 let mut runtime = state
                     .runtime
@@ -1100,6 +1171,9 @@ async fn handle_agent_message(state: &AppState, agent_id: &str, text: &str) -> a
                 data: log,
             });
             state.broadcast_state();
+            if let Some(cleanup) = completed_upgrade {
+                cleanup_completed_upgrade(state, cleanup).await;
+            }
         }
         AgentToServer::UpgradeLog {
             upgrade_id,
@@ -1451,6 +1525,79 @@ impl AppState {
         }
     }
 
+    fn tracked_upgrade_ids(&self) -> anyhow::Result<HashSet<String>> {
+        let runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+        Ok(runtime.upgrades.keys().cloned().collect())
+    }
+
+    fn mark_upgrade_target_completed(
+        &self,
+        upgrade_id: &str,
+        agent_id: &str,
+    ) -> anyhow::Result<Option<UpgradeCleanup>> {
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+        let Some(package) = runtime.upgrades.get_mut(upgrade_id) else {
+            return Ok(None);
+        };
+        if !package.targets.contains(agent_id) {
+            return Ok(None);
+        }
+        package.completed.insert(agent_id.to_owned());
+        if !package.targets.is_empty() && package.targets.is_subset(&package.completed) {
+            let package = runtime
+                .upgrades
+                .remove(upgrade_id)
+                .expect("upgrade package exists");
+            return Ok(Some(UpgradeCleanup {
+                upgrade_id: upgrade_id.to_owned(),
+                dir: package.dir,
+                filename: package.filename,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn mark_agent_upgrades_completed_by_version(
+        &self,
+        agent_id: &str,
+        version: &str,
+    ) -> anyhow::Result<Vec<UpgradeCleanup>> {
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+        let mut complete_ids = Vec::new();
+        for (upgrade_id, package) in &mut runtime.upgrades {
+            if !package.targets.contains(agent_id) || package.completed.contains(agent_id) {
+                continue;
+            }
+            if package.target_version.as_deref() == Some(version) {
+                package.completed.insert(agent_id.to_owned());
+                if !package.targets.is_empty() && package.targets.is_subset(&package.completed) {
+                    complete_ids.push(upgrade_id.clone());
+                }
+            }
+        }
+
+        let mut cleanups = Vec::new();
+        for upgrade_id in complete_ids {
+            if let Some(package) = runtime.upgrades.remove(&upgrade_id) {
+                cleanups.push(UpgradeCleanup {
+                    upgrade_id,
+                    dir: package.dir,
+                    filename: package.filename,
+                });
+            }
+        }
+        Ok(cleanups)
+    }
+
     fn remove_pending_delete(&self, run_id: &str) {
         if let Ok(mut runtime) = self.runtime.lock() {
             runtime.pending_deletes.remove(run_id);
@@ -1572,6 +1719,79 @@ fn upgrade_blocks_dispatch(status: Option<&str>) -> bool {
         || status.starts_with("success"))
 }
 
+fn is_upgrade_completion_status(status: &str) -> bool {
+    status == "restart_requested" || status == "success"
+}
+
+async fn cleanup_completed_upgrade(state: &AppState, cleanup: UpgradeCleanup) {
+    remove_upgrade_dir(&cleanup.upgrade_id, &cleanup.dir).await;
+    state.emit_upgrade_log(UiMessage::UpgradeLog {
+        agent_id: "server".to_owned(),
+        upgrade_id: cleanup.upgrade_id.clone(),
+        stream: None,
+        seq: None,
+        data: format!(
+            "[server] {} completed on all target agents; deleted {}\n",
+            cleanup.upgrade_id, cleanup.filename
+        ),
+    });
+}
+
+async fn remove_upgrade_dir(upgrade_id: &str, dir: &FsPath) {
+    match fs::remove_dir_all(dir).await {
+        Ok(()) => info!(%upgrade_id, dir = %dir.display(), "deleted server upgrade package"),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            warn!(%upgrade_id, dir = %dir.display(), %err, "delete server upgrade package failed")
+        }
+    }
+}
+
+async fn cleanup_untracked_upgrade_dirs(upgrades_dir: &FsPath, tracked: &HashSet<String>) -> usize {
+    let mut entries = match fs::read_dir(upgrades_dir).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(err) => {
+            warn!(dir = %upgrades_dir.display(), %err, "read server upgrades dir failed");
+            return 0;
+        }
+    };
+
+    let mut removed = 0;
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(err) => {
+                warn!(dir = %upgrades_dir.display(), %err, "read server upgrade entry failed");
+                break;
+            }
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("upgrade_") || tracked.contains(name) {
+            continue;
+        }
+        let path = entry.path();
+        let result = match entry.file_type().await {
+            Ok(file_type) if file_type.is_dir() => fs::remove_dir_all(&path).await,
+            Ok(_) => fs::remove_file(&path).await,
+            Err(err) => {
+                warn!(path = %path.display(), %err, "stat server upgrade entry failed");
+                continue;
+            }
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => warn!(path = %path.display(), %err, "remove server upgrade entry failed"),
+        }
+    }
+    removed
+}
+
 fn truncate_close_reason(value: &str) -> String {
     let mut reason = String::new();
     for ch in value.chars() {
@@ -1625,6 +1845,63 @@ fn validate_upgrade_filename(kind: UpgradePackageKind, filename: &str) -> anyhow
         );
     }
     Ok(())
+}
+
+fn parse_upgrade_target_version(kind: UpgradePackageKind, filename: &str) -> Option<String> {
+    match kind {
+        UpgradePackageKind::Deb => parse_deb_target_version(filename),
+        UpgradePackageKind::Rpm => parse_rpm_target_version(filename),
+        UpgradePackageKind::Emerge => parse_emerge_target_version(filename),
+    }
+}
+
+fn parse_deb_target_version(filename: &str) -> Option<String> {
+    let stem = filename.strip_suffix(".deb")?;
+    let version_arch = stem.strip_prefix("buildsvc_")?;
+    let (version_release, _arch) = version_arch.rsplit_once('_')?;
+    let version = version_release
+        .split_once('-')
+        .map_or(version_release, |(version, _)| version);
+    (!version.is_empty()).then(|| version.to_owned())
+}
+
+fn parse_rpm_target_version(filename: &str) -> Option<String> {
+    let stem = filename.strip_suffix(".rpm")?;
+    let name_version = stem.strip_prefix("buildsvc-")?;
+    let (version, _release_arch) = name_version.split_once('-')?;
+    (!version.is_empty()).then(|| version.to_owned())
+}
+
+fn parse_emerge_target_version(filename: &str) -> Option<String> {
+    let stem = filename
+        .strip_suffix("-gentoo-overlay.tar.gz")
+        .or_else(|| filename.strip_suffix("-gentoo-overlay.tgz"))?;
+    let version = stem.strip_prefix("buildsvc-")?;
+    (!version.is_empty()).then(|| version.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_upgrade_target_versions() {
+        assert_eq!(
+            parse_upgrade_target_version(UpgradePackageKind::Deb, "buildsvc_0.9.0-1_amd64.deb"),
+            Some("0.9.0".to_owned())
+        );
+        assert_eq!(
+            parse_upgrade_target_version(UpgradePackageKind::Rpm, "buildsvc-0.9.0-1.x86_64.rpm"),
+            Some("0.9.0".to_owned())
+        );
+        assert_eq!(
+            parse_upgrade_target_version(
+                UpgradePackageKind::Emerge,
+                "buildsvc-0.9.0-gentoo-overlay.tar.gz",
+            ),
+            Some("0.9.0".to_owned())
+        );
+    }
 }
 
 fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> anyhow::Result<&'a str> {

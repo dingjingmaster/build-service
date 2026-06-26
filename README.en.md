@@ -384,9 +384,10 @@ Upgrade flow:
 2. The server sends an upgrade command over the agent WebSocket.
 3. The agent downloads the package and verifies sha256.
 4. The agent installs it with the matching package manager. For deb, if the first install hits a `dpkg was interrupted` style failure, the agent writes a background script and prefers `systemd-run` to execute it outside the buildsvc service cgroup, falling back to `nohup`.
-5. After a normal upgrade, the agent removes the current `<upgrade_work_dir>/<upgrade_id>` temporary directory. The deferred deb script also removes that directory after success.
+5. After a normal upgrade, the agent removes all `upgrade_*` temporary directories under `<upgrade_work_dir>`. The deferred deb script does the same after success.
 6. The agent runs `systemctl daemon-reload` and `systemctl restart buildsvc`.
 7. After reconnecting, the new agent version appears in the Agents table.
+8. After all target agents for that upgrade are confirmed complete, the server deletes the uploaded upgrade package. On startup, the server also removes stale upgrade package directories.
 
 Configuration files are not forcibly overwritten:
 

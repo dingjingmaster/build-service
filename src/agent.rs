@@ -93,6 +93,14 @@ pub async fn run(core: CoreConfig, config: AgentConfig) -> anyhow::Result<()> {
         fs::create_dir_all(&config.upgrade_work_dir)
             .await
             .with_context(|| format!("create {}", config.upgrade_work_dir.display()))?;
+        let removed = cleanup_upgrade_work_dir(&config.upgrade_work_dir).await;
+        if removed > 0 {
+            info!(
+                dir = %config.upgrade_work_dir.display(),
+                count = removed,
+                "cleaned stale upgrade work entries"
+            );
+        }
     }
     fs::create_dir_all(core.data_dir.join("tmp")).await.ok();
 
@@ -435,7 +443,8 @@ mod tests {
         assert!(script.contains("dpkg --configure -a"));
         assert!(script.contains("apt-get install -y -o Dpkg::Options::=--force-confold"));
         assert!(script.contains("dpkg --force-confold -i"));
-        assert!(script.contains("rm -rf -- \"$UPGRADE_DIR\""));
+        assert!(script.contains("UPGRADE_ROOT=$(dirname -- \"$UPGRADE_DIR\")"));
+        assert!(script.contains("rm -rf -- \"$UPGRADE_ROOT\"/upgrade_*"));
         assert!(script.contains("'\"'\"'"));
     }
 }
@@ -1037,8 +1046,13 @@ async fn execute_upgrade(
     }
 
     send_upgrade_status(&runtime, &upgrade_id, "installed", None);
-    send_upgrade_status(&runtime, &upgrade_id, "cleaning", Some(upgrade_id.clone()));
-    cleanup_upgrade_dir(&upgrade_dir).await?;
+    let removed = cleanup_upgrade_work_dir(&runtime.config.upgrade_work_dir).await;
+    send_upgrade_status(
+        &runtime,
+        &upgrade_id,
+        "cleaned",
+        Some(format!("{removed} upgrade temp entries")),
+    );
     run_systemctl_daemon_reload(&runtime, &upgrade_id).await?;
     send_upgrade_status(
         &runtime,
@@ -1085,12 +1099,49 @@ async fn download_upgrade_package(
     Ok(())
 }
 
-async fn cleanup_upgrade_dir(upgrade_dir: &Path) -> anyhow::Result<()> {
-    match fs::remove_dir_all(upgrade_dir).await {
-        Ok(()) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(err) => Err(err).with_context(|| format!("remove {}", upgrade_dir.display())),
+async fn cleanup_upgrade_work_dir(upgrade_work_dir: &Path) -> usize {
+    let mut entries = match fs::read_dir(upgrade_work_dir).await {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(err) => {
+            warn!(dir = %upgrade_work_dir.display(), %err, "read upgrade work dir failed");
+            return 0;
+        }
+    };
+
+    let mut removed = 0;
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => break,
+            Err(err) => {
+                warn!(dir = %upgrade_work_dir.display(), %err, "read upgrade work entry failed");
+                break;
+            }
+        };
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with("upgrade_") {
+            continue;
+        }
+        let path = entry.path();
+        let result = match entry.file_type().await {
+            Ok(file_type) if file_type.is_dir() => fs::remove_dir_all(&path).await,
+            Ok(_) => fs::remove_file(&path).await,
+            Err(err) => {
+                warn!(path = %path.display(), %err, "stat upgrade work entry failed");
+                continue;
+            }
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => warn!(path = %path.display(), %err, "remove upgrade work entry failed"),
+        }
     }
+    removed
 }
 
 async fn install_upgrade_package(
@@ -1282,6 +1333,7 @@ set -eu
 PACKAGE={package_path}
 UPGRADE_DIR={upgrade_dir}
 LOG={log_path}
+UPGRADE_ROOT=$(dirname -- "$UPGRADE_DIR")
 
 {{
     echo "[buildsvc] deferred deb upgrade started: $(date -Is 2>/dev/null || date)"
@@ -1296,7 +1348,7 @@ LOG={log_path}
         systemctl daemon-reload >/dev/null 2>&1 || true
     fi
     cd /
-    rm -rf -- "$UPGRADE_DIR"
+    rm -rf -- "$UPGRADE_ROOT"/upgrade_*
     if command -v systemctl >/dev/null 2>&1; then
         systemctl restart buildsvc.service >/dev/null 2>&1 || true
     fi
