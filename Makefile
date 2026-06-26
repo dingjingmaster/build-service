@@ -1,4 +1,4 @@
-.PHONY: release debug test
+.PHONY: release debug test deb rpm emerge
 
 release:
 	cargo build --release
@@ -9,3 +9,11 @@ debug:
 test:
 	cargo test
 
+deb: release
+	sh packaging/package.sh deb
+
+rpm: release
+	sh packaging/package.sh rpm
+
+emerge: release
+	sh packaging/package.sh emerge

@@ -21,3 +21,4 @@
 | 2 | 2026-06-26 | L3 | task | [2-task-run-delete.md](2-task-run-delete.md) | 已完成 | Runs 多选删除、agent 工作区清理确认和 server 记录删除。 |
 | 3 | 2026-06-26 | L2 | task | [3-task-build-delete.md](3-task-build-delete.md) | 已完成 | Builds 多选删除 server 源码包和 build 记录。 |
 | 4 | 2026-06-26 | L3 | task | [4-task-agent-terminal.md](4-task-agent-terminal.md) | 已完成 | Agent Web 终端，基于 PTY 和 WebSocket 转发输入输出。 |
+| 5 | 2026-06-26 | L3 | task | [5-task-linux-packaging.md](5-task-linux-packaging.md) | 已完成 | deb、rpm、Gentoo emerge overlay 打包入口。 |

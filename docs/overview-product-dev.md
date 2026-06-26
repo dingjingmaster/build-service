@@ -11,12 +11,13 @@
 | 类别 | 技术/版本 | 用途 | 备注 |
 |------|-----------|------|------|
 | 语言 | Rust 2024 edition | 单二进制 server/agent | 当前验证工具链 Rust 1.93.1 |
-| 构建系统 | Makefile + Cargo | 构建、测试、格式化 | `make`、`make debug`、`make test` |
+| 构建系统 | Makefile + Cargo | 构建、测试、格式化、打包 | `make`、`make debug`、`make test`、`make deb`、`make rpm`、`make emerge` |
 | 运行平台 | Linux、Windows、macOS | agent/server 目标平台 | 当前仅在 Linux 工作区自动验证 |
 | HTTP/WebSocket | axum、tokio、tokio-tungstenite | server API/UI 和 agent WS client | WebSocket 消息为 JSON text |
 | 持久化 | rusqlite + SQLite | build/run 元数据 | 日志和源码包放文件系统 |
 | 解包 | tar、flate2、zip | `tar.gz`/`zip` source archive | 校验顶层唯一目录和路径安全 |
 | PTY | portable-pty | Agent 交互式 Web 终端 | server 只转发，PTY 在 agent 本机创建 |
+| Linux 打包 | dpkg-deb、rpmbuild、Portage ebuild overlay | 生成 deb/rpm/Gentoo emerge 包定义 | 输出到 `target/package/` |
 
 ## 2. 架构边界
 
@@ -95,6 +96,11 @@
   - 删除 build 时，如果该 build 下无 run 记录，server 删除 `<server_data_dir>/sources/<build_id>` 和 `builds` 表记录。
   - 删除 run 时，agent 删除 `<agent_work_dir>/runs/<run_id>`，server 删除 `runs` 表记录和 `<server_data_dir>/logs/<run_id>.log`。
   - terminal session 当前不持久化命令记录和输出日志。
+- Linux 包安装内容：
+  - `/usr/bin/buildsvc`。
+  - `/etc/buildsvc/buildsvc.ini`。
+  - `/usr/lib/systemd/system/buildsvc.service`。
+  - `/usr/share/doc/buildsvc/examples/server.ini` 和 `agent.ini`。
 - 迁移/兼容规则：
   - 第一版没有 schema migration 框架，仅 `CREATE TABLE IF NOT EXISTS`。
 - 敏感信息处理：
@@ -122,6 +128,9 @@
 - Release 构建：`make`
 - Debug 构建：`make debug`
 - 单元测试：`make test`
+- Debian 包：`make deb`
+- RPM 包：`make rpm`
+- Gentoo overlay：`make emerge`
 - 底层 Cargo 验证：`cargo fmt --check`、`cargo check`
 - 格式检查：`cargo fmt --check`
 - 静态检查：暂未启用 clippy 作为强制门禁。
@@ -140,7 +149,12 @@
 ## 7. 发布与回滚
 
 - 产物：`buildsvc` 单二进制。
-- 安装/部署方式：将二进制和 INI 配置放到目标机器，service 文件由运维侧编写。
+- Linux 包产物：
+  - deb：`target/package/buildsvc_<version>-1_<arch>.deb`。
+  - rpm：`target/package/buildsvc-<version>-1.<arch>.rpm`。
+  - Gentoo：`target/package/buildsvc-<version>-gentoo-overlay.tar.gz`，包含 `app-admin/buildsvc` ebuild overlay，可通过 `PORTDIR_OVERLAY=<overlay> emerge -av app-admin/buildsvc` 使用。
+  - Gentoo ebuild 默认使用当前稳定架构 keyword（如 `amd64`、`arm64`）；如需 unstable keyword，可通过 `GENTOO_KEYWORDS='~amd64' make emerge` 覆盖。
+- 安装/部署方式：可将二进制和 INI 配置手动放到目标机器，也可使用 deb/rpm/Gentoo overlay 包安装；Linux 包内置 systemd unit。
 - 配置变更：修改 INI 后重启对应进程。
 - 升级步骤：停止进程、替换二进制、启动进程。
 - 回滚步骤：停止进程、换回旧二进制、启动进程。
