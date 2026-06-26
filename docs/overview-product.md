@@ -23,6 +23,9 @@
   - server 实时显示 agent 状态、run 状态、日志和退出码。
   - server 支持删除 offline agent。
   - failed/lost/canceled/success run 可手动 rerun。
+  - 已结束 run 可从 Web UI 删除；删除前必须由在线 agent 成功删除对应工作区目录。
+  - 无关联 run 的 source archive/build 可从 Web UI 删除。
+  - Web UI 可从在线 Agents 打开交互式终端；终端通过 agent WebSocket/PTTY 转发，不依赖 SSH。
 - 不支持功能：
   - 第一版不支持断点续传。
   - 第一版不管理 artifacts。
@@ -39,6 +42,9 @@
 | 执行构建 | agent 运行源码根目录固定脚本 | exit code 0 为 success，非 0 为 failed | 脚本缺失、解包失败或超时为 failed |
 | 查看状态 | server 实时展示 agent 和 run | Web UI 通过 WebSocket 更新；Agents 在线优先，再按计算机名排序 | agent 断线后显示 offline，运行中 run 标记 lost |
 | 重跑任务 | 手动重跑已结束 run | 新建 queued run 并重新调度 | running run 不允许 rerun |
+| 删除 Run | 清理已结束 run 的 agent 工作区和界面记录 | agent 在线并成功删除 `<agent_work_dir>/runs/<run_id>` 后，server 删除 run 记录和日志 | agent 离线、run 未结束或工作区删除失败时拒绝删除 |
+| 删除源码包 | 清理 server 上已上传源码包 | build 下没有 run 记录时，删除 `<server_data_dir>/sources/<build_id>` 和 build 记录 | 仍有关联 run 时拒绝删除，需先删除对应 Runs |
+| 打开 Agent 终端 | 从 Web UI 直接操作 agent 所在机器 | server/agent 均启用终端，agent 在线，PTY 输出实时显示，键盘输入实时转发 | 未启用、agent 离线或会话数达到限制时拒绝 |
 
 ## 4. 核心流程
 
@@ -49,7 +55,8 @@
 4. server 创建 build 和 runs，并向在线且有容量的 agent 下发 run_start。
 5. agent 下载源码包，解包顶层唯一目录，执行 run-build.sh 或 run-build.bat。
 6. agent 通过 WebSocket 回传日志、状态和最终退出码。
-7. server 更新 Web UI，并允许用户对结束 run 手动 rerun。
+7. server 更新 Web UI，并允许用户对结束 run 手动 rerun 或 delete。
+8. 用户可从 Agents 列表打开终端；server 只转发浏览器输入输出，agent 在本机打开 shell/PTTY。
 ```
 
 ## 5. 产品规则
@@ -77,12 +84,17 @@
   - Agents 列表显示 agent 名、最新计算机名、状态和容量。
   - Agents 列表排序为在线 agent 优先，离线 agent 靠后，同组内按计算机名排序。
   - offline agent 可从 server 运行时列表删除；删除后该 agent 不再显示，也不能继续用原 token 接入，直到 server 重启或重新加入配置。
+  - Runs 列表支持多选、全选和 Delete 键删除；删除仅对已结束 run 生效。
+  - 删除 run 时，server 必须先请求对应在线 agent 删除本地工作区；agent 确认成功后，server 才删除界面记录和 server 侧日志。
+  - Builds 列表支持多选、全选和 Delete 键删除；删除仅清理 server 侧源码包和 build 记录，不触碰 agent 工作区。
+  - Agents 列表对在线且启用终端的 agent 显示 `Open` 入口，打开后进入 Web 终端面板。
+  - 终端能力默认配置关闭；server 和 agent 侧都启用时才允许打开。
 
 ## 6. 非功能要求
 
 - 性能：源码上传流式写入磁盘，不整体读入内存。
 - 可用性：agent 主动连接 server，适配局域网和 NAT 场景。
-- 安全：无构建隔离；脚本以 agent 进程权限运行，只适合可信源码和可信网络。
+- 安全：无构建隔离；脚本和 Web 终端都以 agent 进程权限运行，只适合可信源码、可信网络和低权限 agent 运行用户。
 - 兼容性：跨平台脚本名固定，平台差异由脚本和 agent 执行器处理。
 - 可观测性：server 记录 run 状态和日志文件；自身日志使用 tracing。
 

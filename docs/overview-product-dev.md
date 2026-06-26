@@ -16,6 +16,7 @@
 | HTTP/WebSocket | axum、tokio、tokio-tungstenite | server API/UI 和 agent WS client | WebSocket 消息为 JSON text |
 | 持久化 | rusqlite + SQLite | build/run 元数据 | 日志和源码包放文件系统 |
 | 解包 | tar、flate2、zip | `tar.gz`/`zip` source archive | 校验顶层唯一目录和路径安全 |
+| PTY | portable-pty | Agent 交互式 Web 终端 | server 只转发，PTY 在 agent 本机创建 |
 
 ## 2. 架构边界
 
@@ -24,12 +25,13 @@
   - `protocol`：agent/server/UI JSON 消息和 UI view model。
   - `storage`：SQLite schema、build/run 状态、日志文件。
   - `server`：HTTP API、Web UI、agent WebSocket、调度。
-  - `agent`：WebSocket client、源码下载、解包、脚本执行、日志回传。
+  - `agent`：WebSocket client、源码下载、解包、脚本执行、日志回传、PTY 终端会话。
   - `archive`：跨格式解包与路径校验。
 - 进程/线程边界：
   - server 和每个 agent 是独立进程。
   - server 使用 tokio 异步处理 HTTP/WS；SQLite 操作用 mutex 包装。
   - agent 每个 run 使用独立任务和独立工作目录。
+  - agent 每个 terminal session 使用独立 PTY、读写线程和 wait 线程。
 - 客户端/服务端边界：
   - Browser 只连接 server。
   - Agent 主动连接 server，不由 server SSH 推送。
@@ -37,23 +39,29 @@
   - Browser 上传源码包到 server。
   - Agent 通过 HTTP 下载源码包。
   - Agent 通过 WebSocket 回传状态和日志。
+  - Web terminal 通过 browser-server WebSocket 和 server-agent WebSocket 双跳转发输入输出。
 - 控制流：
   - server 根据 online agent 容量调度 queued run。
   - cancel/rerun 由 server API 触发。
+  - run delete 由 server API 触发，server 通过 agent WebSocket 等待工作区删除确认后再删除 SQLite 记录。
+  - terminal start/input/resize/close 由 browser WebSocket 触发，server 转发给在线 agent。
 - 外部依赖：
   - 无外部数据库或消息队列。
-  - agent 执行脚本依赖本机 shell 和编译环境。
+  - agent 执行脚本和 terminal shell 依赖本机 shell 和编译环境。
 
 ## 3. 关键接口
 
 | 接口/协议/ABI | 调用方 | 提供方 | 兼容约束 | 说明 |
 |---------------|--------|--------|----------|------|
-| `/api/agent/ws` | agent | server | JSON text WebSocket | hello、computer_name、heartbeat、run_start、run_log、run_finished、run_cancel |
+| `/api/agent/ws` | agent | server | JSON text WebSocket | hello、computer_name、heartbeat、run_start、run_log、run_finished、run_cancel、run_delete、run_deleted、terminal_start/input/resize/close、terminal_output/exit |
 | `/api/ui/ws` | browser | server | JSON text WebSocket | 推送完整 UI state 和日志增量 |
+| `/api/agents/{name}/terminal/ws` | browser | server | JSON text WebSocket | 为在线 agent 打开 PTY 终端会话并转发输入输出 |
 | `POST /api/builds` | browser | server | multipart form | 上传 source，传 target agents/labels |
+| `DELETE /api/builds/{id}` | browser | server | build with no runs only | 删除 server 侧 source 目录和 build 记录 |
 | `DELETE /api/agents/{name}` | browser | server | offline agent only | 从 server 运行时 agent 列表删除离线 agent |
 | `GET /api/runs/{id}/source` | agent | server | agent name/token header | 下载已分配源码包 |
 | `GET /api/runs/{id}/log` | browser | server | text/plain | 读取 run 完整日志 |
+| `DELETE /api/runs/{id}` | browser | server | terminal run only | 请求对应在线 agent 删除工作区，确认后删除 run 记录和日志 |
 | `POST /api/runs/{id}/rerun` | browser | server | finished run only | 为同一 agent/source 新建 run |
 | `POST /api/runs/{id}/cancel` | browser | server | active run | 下发 cancel 或直接标记 canceled |
 
@@ -72,13 +80,21 @@
   - 项目内开发样例：`configs/server.ini`、`configs/agent.ini`。
   - `server.agent_heartbeat_sec` 默认 5 秒，由 server 在 `hello_accepted` 中下发给 agent。
   - `server.agent_offline_after_sec` 默认 15 秒，超时后 server 将 agent 从在线表移除，Web UI 显示 `offline`。
+  - `server.terminal_enabled` 默认 `false`；关闭时 Web UI 不能打开 agent 终端。
   - `agent.advertise_ip` 可选；多网卡或非标准网卡名机器建议显式配置。
   - 未配置 `agent.advertise_ip` 时，agent 枚举本机网卡，优先选择有线/无线物理网卡地址，并过滤 lo/docker/veth/tun/bridge 等虚拟接口。
+  - `agent.terminal_enabled` 默认 `false`；打开后 agent hello 上报终端能力。
+  - `agent.terminal_shell` 可选；未配置时 Linux/macOS 使用 `SHELL` 或 `/bin/sh`，Windows 使用 `COMSPEC` 或 `cmd.exe`。
+  - `agent.terminal_work_dir` 默认 `<agent_work_dir>/terminal`。
+  - `agent.terminal_max_sessions` 默认 1。
 - 持久化数据：
   - SQLite：`<server_data_dir>/buildsvc.db`。
   - 源码包：`<server_data_dir>/sources/<build_id>/source.*`。
   - 日志：`<server_data_dir>/logs/<run_id>.log`。
   - agent 工作目录：`<agent_work_dir>/runs/<run_id>/...`。
+  - 删除 build 时，如果该 build 下无 run 记录，server 删除 `<server_data_dir>/sources/<build_id>` 和 `builds` 表记录。
+  - 删除 run 时，agent 删除 `<agent_work_dir>/runs/<run_id>`，server 删除 `runs` 表记录和 `<server_data_dir>/logs/<run_id>.log`。
+  - terminal session 当前不持久化命令记录和输出日志。
 - 迁移/兼容规则：
   - 第一版没有 schema migration 框架，仅 `CREATE TABLE IF NOT EXISTS`。
 - 敏感信息处理：
@@ -96,7 +112,8 @@
 |----------|--------|----------|----------|
 | 并发/锁 | runtime mutex 与 SQLite mutex 的锁顺序 | `cargo test` 覆盖 storage 死锁回归；人工审查无 await 持锁跨网络 | docs/dev/1-plan-buildsvc-mvp.md |
 | 协议 | WebSocket JSON 兼容和坏消息处理 | `cargo check`、人工审查错误路径 | docs/dev/1-plan-buildsvc-mvp.md |
-| 权限/系统调用 | agent 运行用户脚本并终止进程组 | Linux 编译验证；Windows/macOS 需后续实机验证 | docs/dev/1-plan-buildsvc-mvp.md |
+| 权限/系统调用 | agent 运行用户脚本、PTY shell 并终止进程组/终端会话 | Linux 编译验证；Windows/macOS 需后续实机验证 | docs/dev/1-plan-buildsvc-mvp.md |
+| Web 终端 | 键盘输入、resize、关闭会话和断线清理 | 本地 server/agent PTY smoke；Windows/macOS 需实机补测 | docs/dev/4-task-agent-terminal.md |
 | 文件系统 | archive 路径穿越和顶层目录约束 | archive 单元测试 | docs/dev/1-plan-buildsvc-mvp.md |
 | 数据保留 | 日志保留和运行中任务重启恢复 | storage 测试和人工审查 | docs/dev/1-plan-buildsvc-mvp.md |
 

@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    io::{Read, Write},
     net::Ipv4Addr,
     path::{Path, PathBuf},
     process::Stdio,
@@ -13,6 +14,7 @@ use std::{
 use anyhow::{Context, bail};
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
+use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use reqwest::Client;
 use tokio::{
     fs,
@@ -36,6 +38,7 @@ struct AgentRuntime {
     client: Client,
     sender: mpsc::UnboundedSender<AgentToServer>,
     runs: Arc<Mutex<HashMap<String, RunControl>>>,
+    terminal_sessions: Arc<Mutex<HashMap<String, TerminalControl>>>,
     semaphore: Arc<Semaphore>,
 }
 
@@ -44,10 +47,25 @@ struct RunControl {
     cancel: oneshot::Sender<()>,
 }
 
+struct TerminalControl {
+    sender: mpsc::UnboundedSender<TerminalCommand>,
+}
+
+enum TerminalCommand {
+    Input(Vec<u8>),
+    Resize { rows: u16, cols: u16 },
+    Close,
+}
+
 pub async fn run(core: CoreConfig, config: AgentConfig) -> anyhow::Result<()> {
     fs::create_dir_all(&config.work_dir)
         .await
         .with_context(|| format!("create {}", config.work_dir.display()))?;
+    if config.terminal_enabled {
+        fs::create_dir_all(&config.terminal_work_dir)
+            .await
+            .with_context(|| format!("create {}", config.terminal_work_dir.display()))?;
+    }
     fs::create_dir_all(core.data_dir.join("tmp")).await.ok();
 
     loop {
@@ -70,6 +88,7 @@ async fn run_once(config: AgentConfig) -> anyhow::Result<()> {
         client: Client::new(),
         sender: out_tx.clone(),
         runs: Arc::new(Mutex::new(HashMap::new())),
+        terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
         semaphore: Arc::new(Semaphore::new(config.concurrency.max(1))),
     };
 
@@ -83,6 +102,7 @@ async fn run_once(config: AgentConfig) -> anyhow::Result<()> {
         platform: std::env::consts::OS.to_owned(),
         arch: std::env::consts::ARCH.to_owned(),
         concurrency: config.concurrency.max(1),
+        terminal_enabled: config.terminal_enabled,
         version: env!("CARGO_PKG_VERSION").to_owned(),
     })?;
 
@@ -131,6 +151,7 @@ async fn run_once(config: AgentConfig) -> anyhow::Result<()> {
         heartbeat.abort();
     }
     writer.abort();
+    close_all_terminals(runtime.clone()).await;
     cancel_all(runtime).await;
     Ok(())
 }
@@ -269,6 +290,16 @@ mod tests {
         assert_eq!(physical_interface_score("veth123"), 0);
         assert_eq!(physical_interface_score("tun0"), 0);
     }
+
+    #[test]
+    fn rejects_unsafe_run_work_dir_ids() {
+        let work_dir = Path::new("/tmp/buildsvc-agent");
+        assert!(run_work_dir(work_dir, "run_123").is_ok());
+        assert!(run_work_dir(work_dir, "../run_123").is_err());
+        assert!(run_work_dir(work_dir, "run/123").is_err());
+        assert!(run_work_dir(work_dir, r"run\123").is_err());
+        assert!(run_work_dir(work_dir, "").is_err());
+    }
 }
 
 async fn heartbeat_loop(runtime: AgentRuntime, heartbeat_sec: u64) {
@@ -331,6 +362,54 @@ async fn handle_server_message(
         ServerToAgent::RunCancel { run_id, reason } => {
             warn!(%run_id, %reason, "cancel requested");
             cancel_run(runtime, &run_id).await;
+        }
+        ServerToAgent::RunDelete { run_id } => {
+            let result = delete_run_workspace(&runtime, &run_id).await;
+            let (success, error) = match result {
+                Ok(()) => (true, None),
+                Err(err) => (false, Some(err.to_string())),
+            };
+            let _ = runtime.sender.send(AgentToServer::RunDeleted {
+                run_id,
+                success,
+                error,
+            });
+        }
+        ServerToAgent::TerminalStart {
+            session_id,
+            rows,
+            cols,
+        } => {
+            if let Err(err) = start_terminal_session(&runtime, session_id.clone(), rows, cols).await
+            {
+                let _ = runtime.sender.send(AgentToServer::TerminalExit {
+                    session_id,
+                    exit_code: None,
+                    message: Some(err.to_string()),
+                });
+            }
+        }
+        ServerToAgent::TerminalInput { session_id, data } => {
+            let bytes = BASE64.decode(data)?;
+            send_terminal_command(&runtime, &session_id, TerminalCommand::Input(bytes)).await?;
+        }
+        ServerToAgent::TerminalResize {
+            session_id,
+            rows,
+            cols,
+        } => {
+            send_terminal_command(
+                &runtime,
+                &session_id,
+                TerminalCommand::Resize {
+                    rows: rows.clamp(5, 200),
+                    cols: cols.clamp(20, 300),
+                },
+            )
+            .await?;
+        }
+        ServerToAgent::TerminalClose { session_id } => {
+            let _ = send_terminal_command(&runtime, &session_id, TerminalCommand::Close).await;
         }
     }
     Ok(())
@@ -413,7 +492,7 @@ async fn execute_run(
         state: "preparing".to_owned(),
     })?;
 
-    let run_dir = runtime.config.work_dir.join("runs").join(&run_id);
+    let run_dir = run_work_dir(&runtime.config.work_dir, &run_id)?;
     let archive_dir = run_dir.join("archive");
     let src_dir = run_dir.join("src");
     fs::create_dir_all(&archive_dir).await?;
@@ -684,11 +763,203 @@ async fn cancel_run(runtime: AgentRuntime, run_id: &str) {
     }
 }
 
+async fn delete_run_workspace(runtime: &AgentRuntime, run_id: &str) -> anyhow::Result<()> {
+    if runtime.runs.lock().await.contains_key(run_id) {
+        bail!("run is active; cancel it before deleting");
+    }
+
+    let run_dir = run_work_dir(&runtime.config.work_dir, run_id)?;
+    match fs::remove_dir_all(&run_dir).await {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("remove {}", run_dir.display())),
+    }
+}
+
+fn run_work_dir(work_dir: &Path, run_id: &str) -> anyhow::Result<PathBuf> {
+    if run_id.is_empty()
+        || run_id == "."
+        || run_id == ".."
+        || run_id.contains('/')
+        || run_id.contains('\\')
+    {
+        bail!("invalid run id");
+    }
+    Ok(work_dir.join("runs").join(run_id))
+}
+
+async fn start_terminal_session(
+    runtime: &AgentRuntime,
+    session_id: String,
+    rows: u16,
+    cols: u16,
+) -> anyhow::Result<()> {
+    if !runtime.config.terminal_enabled {
+        bail!("terminal is disabled");
+    }
+    fs::create_dir_all(&runtime.config.terminal_work_dir)
+        .await
+        .with_context(|| format!("create {}", runtime.config.terminal_work_dir.display()))?;
+
+    let mut sessions = runtime.terminal_sessions.lock().await;
+    if sessions.contains_key(&session_id) {
+        bail!("terminal session already exists: {session_id}");
+    }
+    if sessions.len() >= runtime.config.terminal_max_sessions {
+        bail!("terminal session limit reached");
+    }
+
+    let pty_system = native_pty_system();
+    let pair = pty_system.openpty(PtySize {
+        rows: rows.clamp(5, 200),
+        cols: cols.clamp(20, 300),
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
+    let mut command = CommandBuilder::new(terminal_shell(&runtime.config));
+    command.cwd(runtime.config.terminal_work_dir.as_os_str());
+    command.env("TERM", "xterm-256color");
+
+    let mut child = pair.slave.spawn_command(command)?;
+    let mut reader = pair.master.try_clone_reader()?;
+    let mut writer = pair.master.take_writer()?;
+    let mut killer = child.clone_killer();
+    let master = pair.master;
+    let (tx, mut rx) = mpsc::unbounded_channel::<TerminalCommand>();
+
+    sessions.insert(session_id.clone(), TerminalControl { sender: tx });
+    drop(sessions);
+
+    let _ = runtime.sender.send(AgentToServer::TerminalStarted {
+        session_id: session_id.clone(),
+    });
+
+    let output_sender = runtime.sender.clone();
+    let output_session = session_id.clone();
+    std::thread::spawn(move || {
+        let mut buf = vec![0_u8; 8192];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let _ = output_sender.send(AgentToServer::TerminalOutput {
+                        session_id: output_session.clone(),
+                        data: BASE64.encode(&buf[..n]),
+                    });
+                }
+                Err(err) => {
+                    let _ = output_sender.send(AgentToServer::TerminalExit {
+                        session_id: output_session.clone(),
+                        exit_code: None,
+                        message: Some(format!("terminal read failed: {err}")),
+                    });
+                    break;
+                }
+            }
+        }
+    });
+
+    std::thread::spawn(move || {
+        while let Some(command) = rx.blocking_recv() {
+            match command {
+                TerminalCommand::Input(bytes) => {
+                    if writer.write_all(&bytes).is_err() || writer.flush().is_err() {
+                        break;
+                    }
+                }
+                TerminalCommand::Resize { rows, cols } => {
+                    let _ = master.resize(PtySize {
+                        rows: rows.clamp(5, 200),
+                        cols: cols.clamp(20, 300),
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    });
+                }
+                TerminalCommand::Close => {
+                    let _ = killer.kill();
+                    break;
+                }
+            }
+        }
+    });
+
+    let wait_sender = runtime.sender.clone();
+    let wait_sessions = runtime.terminal_sessions.clone();
+    let wait_session = session_id.clone();
+    std::thread::spawn(move || {
+        let result = child.wait();
+        wait_sessions.blocking_lock().remove(&wait_session);
+        match result {
+            Ok(status) => {
+                let _ = wait_sender.send(AgentToServer::TerminalExit {
+                    session_id: wait_session,
+                    exit_code: Some(status.exit_code() as i32),
+                    message: status.signal().map(|signal| signal.to_owned()),
+                });
+            }
+            Err(err) => {
+                let _ = wait_sender.send(AgentToServer::TerminalExit {
+                    session_id: wait_session,
+                    exit_code: None,
+                    message: Some(format!("terminal wait failed: {err}")),
+                });
+            }
+        }
+    });
+
+    Ok(())
+}
+
+async fn send_terminal_command(
+    runtime: &AgentRuntime,
+    session_id: &str,
+    command: TerminalCommand,
+) -> anyhow::Result<()> {
+    let sessions = runtime.terminal_sessions.lock().await;
+    let session = sessions
+        .get(session_id)
+        .with_context(|| format!("terminal session {session_id} not found"))?;
+    session.sender.send(command)?;
+    Ok(())
+}
+
+fn terminal_shell(config: &AgentConfig) -> String {
+    if let Some(shell) = config
+        .terminal_shell
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return shell.to_owned();
+    }
+
+    #[cfg(windows)]
+    {
+        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_owned())
+    }
+    #[cfg(not(windows))]
+    {
+        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())
+    }
+}
+
 async fn cancel_all(runtime: AgentRuntime) {
     let mut runs = runtime.runs.lock().await;
     let controls: Vec<RunControl> = runs.drain().map(|(_, control)| control).collect();
     drop(runs);
     for control in controls {
         let _ = control.cancel.send(());
+    }
+}
+
+async fn close_all_terminals(runtime: AgentRuntime) {
+    let mut sessions = runtime.terminal_sessions.lock().await;
+    let controls = sessions
+        .drain()
+        .map(|(_, control)| control)
+        .collect::<Vec<_>>();
+    drop(sessions);
+    for control in controls {
+        let _ = control.sender.send(TerminalCommand::Close);
     }
 }

@@ -19,11 +19,12 @@ use axum::{
 };
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use tokio::{
     fs,
     io::AsyncWriteExt,
     net::TcpListener,
-    sync::{broadcast, mpsc},
+    sync::{broadcast, mpsc, oneshot},
     time,
 };
 use tower_http::trace::TraceLayer;
@@ -38,6 +39,8 @@ use crate::{
 
 mod ui;
 
+const RUN_DELETE_TIMEOUT_SEC: u64 = 30;
+
 #[derive(Clone)]
 struct AppState {
     server: ServerConfig,
@@ -50,6 +53,8 @@ struct RuntimeState {
     agents: HashMap<String, AgentRuntime>,
     expected_agents: BTreeMap<String, ServerAgentConfig>,
     agent_metadata: HashMap<String, AgentMetadata>,
+    pending_deletes: HashMap<String, PendingDelete>,
+    terminal_sessions: HashMap<String, TerminalSession>,
 }
 
 struct AgentMetadata {
@@ -68,9 +73,47 @@ struct AgentRuntime {
     arch: String,
     version: String,
     concurrency: usize,
+    terminal_enabled: bool,
     running: HashSet<String>,
     last_seen: i64,
     sender: mpsc::UnboundedSender<ServerToAgent>,
+}
+
+struct PendingDelete {
+    agent_name: String,
+    sender: oneshot::Sender<Result<(), String>>,
+}
+
+struct TerminalSession {
+    agent_name: String,
+    sender: mpsc::UnboundedSender<TerminalUiMessage>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TerminalUiMessage {
+    Open {
+        session_id: String,
+        agent_name: String,
+    },
+    Output {
+        data: String,
+    },
+    Exit {
+        exit_code: Option<i32>,
+        message: Option<String>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum TerminalBrowserMessage {
+    Input { data: String },
+    Resize { rows: u16, cols: u16 },
+    Close,
 }
 
 pub async fn run(
@@ -96,6 +139,8 @@ pub async fn run(
             agents: HashMap::new(),
             expected_agents: agents,
             agent_metadata: HashMap::new(),
+            pending_deletes: HashMap::new(),
+            terminal_sessions: HashMap::new(),
         })),
         ui_tx,
     };
@@ -108,11 +153,14 @@ pub async fn run(
         .route("/", get(index))
         .route("/api/state", get(api_state))
         .route("/api/builds", post(upload_build))
+        .route("/api/builds/{build_id}", delete(delete_build))
         .route("/api/runs/{run_id}/source", get(download_source))
         .route("/api/runs/{run_id}/log", get(read_log))
+        .route("/api/runs/{run_id}", delete(delete_run))
         .route("/api/runs/{run_id}/rerun", post(rerun))
         .route("/api/runs/{run_id}/cancel", post(cancel))
         .route("/api/agents/{agent_name}", delete(delete_agent))
+        .route("/api/agents/{agent_name}/terminal/ws", get(terminal_ws))
         .route("/api/agent/ws", get(agent_ws))
         .route("/api/ui/ws", get(ui_ws))
         .layer(DefaultBodyLimit::max(max_upload))
@@ -299,6 +347,15 @@ async fn download_source(
         .into_response())
 }
 
+async fn delete_build(
+    State(state): State<AppState>,
+    Path(build_id): Path<String>,
+) -> Result<JsonResponse<UiState>, ApiError> {
+    state.storage.delete_build(&build_id)?;
+    state.broadcast_state();
+    Ok(JsonResponse(state.ui_state()?))
+}
+
 async fn rerun(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
@@ -345,6 +402,73 @@ async fn cancel(
     Ok(JsonResponse(state.ui_state()?))
 }
 
+async fn delete_run(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+) -> Result<JsonResponse<UiState>, ApiError> {
+    let run = state.storage.get_run(&run_id)?.context("run not found")?;
+    if !is_terminal_run_status(&run.status) {
+        return Err(anyhow::anyhow!("run is not finished; cancel it before deleting").into());
+    }
+
+    let (ack_tx, ack_rx) = oneshot::channel::<Result<(), String>>();
+    let sender = {
+        let mut runtime = state
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+        if runtime.pending_deletes.contains_key(&run_id) {
+            return Err(anyhow::anyhow!("run deletion is already in progress").into());
+        }
+        let sender = runtime
+            .agents
+            .get(&run.agent_name)
+            .with_context(|| format!("agent {} is offline", run.agent_name))?
+            .sender
+            .clone();
+        runtime.pending_deletes.insert(
+            run_id.clone(),
+            PendingDelete {
+                agent_name: run.agent_name.clone(),
+                sender: ack_tx,
+            },
+        );
+        sender
+    };
+
+    if let Err(err) = sender.send(ServerToAgent::RunDelete {
+        run_id: run_id.clone(),
+    }) {
+        state.remove_pending_delete(&run_id);
+        return Err(anyhow::anyhow!("failed to send delete request to agent: {err}").into());
+    }
+
+    match time::timeout(Duration::from_secs(RUN_DELETE_TIMEOUT_SEC), ack_rx).await {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(err))) => return Err(anyhow::anyhow!(err).into()),
+        Ok(Err(_)) => return Err(anyhow::anyhow!("agent delete response was dropped").into()),
+        Err(_) => {
+            state.remove_pending_delete(&run_id);
+            return Err(
+                anyhow::anyhow!("timed out waiting for agent to delete run workspace").into(),
+            );
+        }
+    }
+
+    state.storage.delete_run(&run_id)?;
+    {
+        let mut runtime = state
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+        if let Some(agent) = runtime.agents.get_mut(&run.agent_name) {
+            agent.running.remove(&run_id);
+        }
+    }
+    state.broadcast_state();
+    Ok(JsonResponse(state.ui_state()?))
+}
+
 async fn delete_agent(
     State(state): State<AppState>,
     Path(agent_name): Path<String>,
@@ -364,6 +488,134 @@ async fn delete_agent(
     }
     state.broadcast_state();
     Ok(JsonResponse(state.ui_state()?))
+}
+
+async fn terminal_ws(
+    State(state): State<AppState>,
+    Path(agent_name): Path<String>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_terminal_ws(state, agent_name, socket))
+}
+
+async fn handle_terminal_ws(state: AppState, agent_name: String, socket: WebSocket) {
+    if let Err(err) = terminal_ws_inner(state, agent_name, socket).await {
+        warn!(%err, "terminal websocket closed with error");
+    }
+}
+
+async fn terminal_ws_inner(
+    state: AppState,
+    agent_name: String,
+    socket: WebSocket,
+) -> anyhow::Result<()> {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    if !state.server.terminal_enabled {
+        send_terminal_ws_message(
+            &mut ws_tx,
+            &TerminalUiMessage::Error {
+                message: "server terminal is disabled".to_owned(),
+            },
+        )
+        .await;
+        return Ok(());
+    }
+
+    let session_id = ids::terminal_session_id();
+    let (terminal_tx, mut terminal_rx) = mpsc::unbounded_channel::<TerminalUiMessage>();
+    let agent_sender = {
+        let mut runtime = state
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+        let agent = runtime
+            .agents
+            .get(&agent_name)
+            .with_context(|| format!("agent {agent_name} is offline"))?;
+        if !agent.terminal_enabled {
+            bail!("agent {agent_name} terminal is disabled");
+        }
+        let sender = agent.sender.clone();
+        runtime.terminal_sessions.insert(
+            session_id.clone(),
+            TerminalSession {
+                agent_name: agent_name.clone(),
+                sender: terminal_tx.clone(),
+            },
+        );
+        sender
+    };
+
+    if let Err(err) = agent_sender.send(ServerToAgent::TerminalStart {
+        session_id: session_id.clone(),
+        rows: 32,
+        cols: 120,
+    }) {
+        state.remove_terminal_session(&session_id);
+        bail!("failed to start terminal on agent: {err}");
+    }
+
+    let _ = terminal_tx.send(TerminalUiMessage::Open {
+        session_id: session_id.clone(),
+        agent_name: agent_name.clone(),
+    });
+
+    let writer = tokio::spawn(async move {
+        while let Some(message) = terminal_rx.recv().await {
+            let Ok(text) = serde_json::to_string(&message) else {
+                continue;
+            };
+            if ws_tx.send(Message::Text(text.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    while let Some(message) = ws_rx.next().await {
+        let message = message?;
+        match message {
+            Message::Text(text) => {
+                let browser_message: TerminalBrowserMessage = serde_json::from_str(&text)?;
+                match browser_message {
+                    TerminalBrowserMessage::Input { data } => {
+                        state.send_terminal_to_agent(
+                            &session_id,
+                            ServerToAgent::TerminalInput {
+                                session_id: session_id.clone(),
+                                data,
+                            },
+                        )?;
+                    }
+                    TerminalBrowserMessage::Resize { rows, cols } => {
+                        state.send_terminal_to_agent(
+                            &session_id,
+                            ServerToAgent::TerminalResize {
+                                session_id: session_id.clone(),
+                                rows: rows.clamp(5, 200),
+                                cols: cols.clamp(20, 300),
+                            },
+                        )?;
+                    }
+                    TerminalBrowserMessage::Close => break,
+                }
+            }
+            Message::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    state.close_terminal_session(&session_id);
+    writer.abort();
+    Ok(())
+}
+
+async fn send_terminal_ws_message(
+    ws_tx: &mut futures_util::stream::SplitSink<WebSocket, Message>,
+    message: &TerminalUiMessage,
+) {
+    if let Ok(text) = serde_json::to_string(message) {
+        let _ = ws_tx.send(Message::Text(text.into())).await;
+    }
 }
 
 async fn agent_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -392,6 +644,7 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
         platform,
         arch,
         concurrency,
+        terminal_enabled,
         version,
     } = hello
     else {
@@ -417,6 +670,7 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
                 arch,
                 version,
                 concurrency: concurrency.max(1),
+                terminal_enabled,
                 running: HashSet::new(),
                 last_seen: now_ts(),
                 sender: tx.clone(),
@@ -536,17 +790,103 @@ async fn handle_agent_message(
             state.dispatch_queued()?;
             state.broadcast_state();
         }
+        AgentToServer::RunDeleted {
+            run_id,
+            success,
+            error,
+        } => {
+            let pending = {
+                let mut runtime = state
+                    .runtime
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+                runtime.pending_deletes.remove(&run_id)
+            };
+            let Some(pending) = pending else {
+                warn!(agent = %agent_name, run = %run_id, "received unexpected run delete response");
+                return Ok(());
+            };
+            if pending.agent_name != agent_name {
+                let _ = pending.sender.send(Err(format!(
+                    "delete response came from {}, expected {}",
+                    agent_name, pending.agent_name
+                )));
+                return Ok(());
+            }
+            let result = if success {
+                Ok(())
+            } else {
+                Err(error.unwrap_or_else(|| "agent failed to delete run workspace".to_owned()))
+            };
+            let _ = pending.sender.send(result);
+        }
+        AgentToServer::TerminalStarted { session_id } => {
+            state.send_terminal_ui(
+                agent_name,
+                &session_id,
+                TerminalUiMessage::Open {
+                    session_id: session_id.clone(),
+                    agent_name: agent_name.to_owned(),
+                },
+            )?;
+        }
+        AgentToServer::TerminalOutput { session_id, data } => {
+            state.send_terminal_ui(agent_name, &session_id, TerminalUiMessage::Output { data })?;
+        }
+        AgentToServer::TerminalExit {
+            session_id,
+            exit_code,
+            message,
+        } => {
+            state.finish_terminal_session(
+                agent_name,
+                &session_id,
+                TerminalUiMessage::Exit { exit_code, message },
+            )?;
+        }
     }
     Ok(())
 }
 
 fn disconnect_agent(state: &AppState, agent_name: &str) -> anyhow::Result<()> {
-    {
+    let (pending_deletes, terminal_sessions) = {
         let mut runtime = state
             .runtime
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
         runtime.agents.remove(agent_name);
+        let pending_ids = runtime
+            .pending_deletes
+            .iter()
+            .filter_map(|(run_id, pending)| {
+                (pending.agent_name == agent_name).then(|| run_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let pending_deletes = pending_ids
+            .into_iter()
+            .filter_map(|run_id| runtime.pending_deletes.remove(&run_id))
+            .collect::<Vec<_>>();
+        let terminal_ids = runtime
+            .terminal_sessions
+            .iter()
+            .filter_map(|(session_id, session)| {
+                (session.agent_name == agent_name).then(|| session_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let terminal_sessions = terminal_ids
+            .into_iter()
+            .filter_map(|session_id| runtime.terminal_sessions.remove(&session_id))
+            .collect::<Vec<_>>();
+        (pending_deletes, terminal_sessions)
+    };
+    for pending in pending_deletes {
+        let _ = pending.sender.send(Err("agent disconnected".to_owned()));
+    }
+    for session in terminal_sessions {
+        let _ = session.sender.send(TerminalUiMessage::Exit {
+            exit_code: None,
+            message: Some("agent disconnected".to_owned()),
+        });
     }
     let lost = state.storage.mark_agent_runs_lost(agent_name)?;
     if !lost.is_empty() {
@@ -720,6 +1060,7 @@ impl AppState {
                     current_runs: live.running.iter().cloned().collect(),
                     last_seen: Some(live.last_seen),
                     enabled: expected.enabled,
+                    terminal_enabled: self.server.terminal_enabled && live.terminal_enabled,
                 });
             } else {
                 agents.push(AgentView {
@@ -746,6 +1087,7 @@ impl AppState {
                     current_runs: Vec::new(),
                     last_seen: None,
                     enabled: expected.enabled,
+                    terminal_enabled: false,
                 });
             }
         }
@@ -784,6 +1126,117 @@ impl AppState {
             Err(err) => error!(%err, "failed to build ui state"),
         }
     }
+
+    fn remove_pending_delete(&self, run_id: &str) {
+        if let Ok(mut runtime) = self.runtime.lock() {
+            runtime.pending_deletes.remove(run_id);
+        }
+    }
+
+    fn send_terminal_to_agent(
+        &self,
+        session_id: &str,
+        message: ServerToAgent,
+    ) -> anyhow::Result<()> {
+        let runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+        let session = runtime
+            .terminal_sessions
+            .get(session_id)
+            .with_context(|| format!("terminal session {session_id} is not active"))?;
+        let agent = runtime
+            .agents
+            .get(&session.agent_name)
+            .with_context(|| format!("agent {} is offline", session.agent_name))?;
+        agent.sender.send(message)?;
+        Ok(())
+    }
+
+    fn send_terminal_ui(
+        &self,
+        agent_name: &str,
+        session_id: &str,
+        message: TerminalUiMessage,
+    ) -> anyhow::Result<()> {
+        let runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+        let session = runtime
+            .terminal_sessions
+            .get(session_id)
+            .with_context(|| format!("terminal session {session_id} is not active"))?;
+        if session.agent_name != agent_name {
+            bail!(
+                "terminal session {session_id} belongs to {}, not {agent_name}",
+                session.agent_name
+            );
+        }
+        let _ = session.sender.send(message);
+        Ok(())
+    }
+
+    fn finish_terminal_session(
+        &self,
+        agent_name: &str,
+        session_id: &str,
+        message: TerminalUiMessage,
+    ) -> anyhow::Result<()> {
+        let session = {
+            let mut runtime = self
+                .runtime
+                .lock()
+                .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+            let Some(session) = runtime.terminal_sessions.remove(session_id) else {
+                return Ok(());
+            };
+            if session.agent_name != agent_name {
+                bail!(
+                    "terminal session {session_id} belongs to {}, not {agent_name}",
+                    session.agent_name
+                );
+            }
+            session
+        };
+        let _ = session.sender.send(message);
+        Ok(())
+    }
+
+    fn remove_terminal_session(&self, session_id: &str) {
+        if let Ok(mut runtime) = self.runtime.lock() {
+            runtime.terminal_sessions.remove(session_id);
+        }
+    }
+
+    fn close_terminal_session(&self, session_id: &str) {
+        let (agent_name, agent_sender) = {
+            let mut runtime = match self.runtime.lock() {
+                Ok(runtime) => runtime,
+                Err(_) => return,
+            };
+            let Some(session) = runtime.terminal_sessions.remove(session_id) else {
+                return;
+            };
+            let sender = runtime
+                .agents
+                .get(&session.agent_name)
+                .map(|agent| agent.sender.clone());
+            (session.agent_name, sender)
+        };
+        if let Some(sender) = agent_sender {
+            let _ = sender.send(ServerToAgent::TerminalClose {
+                session_id: session_id.to_owned(),
+            });
+        } else {
+            warn!(agent = %agent_name, session = %session_id, "terminal agent already offline");
+        }
+    }
+}
+
+fn is_terminal_run_status(status: &str) -> bool {
+    matches!(status, "success" | "failed" | "canceled" | "lost")
 }
 
 fn split_csv(value: &str) -> Vec<String> {

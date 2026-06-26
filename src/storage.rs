@@ -23,6 +23,11 @@ struct StorageInner {
 }
 
 #[derive(Debug, Clone)]
+pub struct BuildRow {
+    pub id: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct RunRow {
     pub id: String,
     pub build_id: String,
@@ -172,6 +177,14 @@ impl Storage {
         collect_rows(rows)
     }
 
+    pub fn get_build(&self, build_id: &str) -> anyhow::Result<Option<BuildRow>> {
+        let conn = self.conn()?;
+        let mut stmt = conn.prepare("SELECT id FROM builds WHERE id = ?1")?;
+        stmt.query_row(params![build_id], |row| Ok(BuildRow { id: row.get(0)? }))
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn list_runs(&self) -> anyhow::Result<Vec<RunView>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
@@ -299,6 +312,48 @@ impl Storage {
 
     pub fn cancel_run(&self, run_id: &str) -> anyhow::Result<()> {
         self.update_run_status(run_id, "canceled")
+    }
+
+    pub fn delete_run(&self, run_id: &str) -> anyhow::Result<()> {
+        let run = self.get_run(run_id)?.context("run not found")?;
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM runs WHERE id = ?1", params![run_id])?;
+        drop(conn);
+
+        let path = self.log_path(run_id);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("remove {}", path.display())),
+        }
+
+        self.refresh_build_status(&run.build_id)?;
+        Ok(())
+    }
+
+    pub fn delete_build(&self, build_id: &str) -> anyhow::Result<()> {
+        let build = self.get_build(build_id)?.context("build not found")?;
+        let conn = self.conn()?;
+        let run_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM runs WHERE build_id = ?1",
+            params![build_id],
+            |row| row.get(0),
+        )?;
+        if run_count > 0 {
+            anyhow::bail!("delete runs for this build first");
+        }
+        drop(conn);
+
+        let build_dir = build_source_dir(&self.inner.sources_dir, &build.id)?;
+        match fs::remove_dir_all(&build_dir) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err).with_context(|| format!("remove {}", build_dir.display())),
+        }
+
+        let conn = self.conn()?;
+        conn.execute("DELETE FROM builds WHERE id = ?1", params![build_id])?;
+        Ok(())
     }
 
     pub fn append_log(&self, run_id: &str, stream: &str, bytes: &[u8]) -> anyhow::Result<()> {
@@ -465,6 +520,18 @@ fn aggregate_build_status(statuses: &[String]) -> &'static str {
     }
 }
 
+fn build_source_dir(sources_dir: &Path, build_id: &str) -> anyhow::Result<PathBuf> {
+    if build_id.is_empty()
+        || build_id == "."
+        || build_id == ".."
+        || build_id.contains('/')
+        || build_id.contains('\\')
+    {
+        anyhow::bail!("invalid build id");
+    }
+    Ok(sources_dir.join(build_id))
+}
+
 pub fn now_ts() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -481,7 +548,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let storage =
             Storage::open(dir.path().to_path_buf(), dir.path().join("buildsvc.db")).unwrap();
-        let source = dir.path().join("source.tar.gz");
+        let source_dir = storage.sources_dir().join("build_1");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("source.tar.gz");
         fs::write(&source, b"fake").unwrap();
 
         storage
@@ -513,5 +582,24 @@ mod tests {
 
         storage.append_log("run_1", "stdout", b"hello\n").unwrap();
         assert_eq!(storage.read_log("run_1").unwrap(), "hello\n");
+
+        storage.delete_run("run_1").unwrap();
+        assert!(storage.get_run("run_1").unwrap().is_none());
+        assert_eq!(storage.read_log("run_1").unwrap(), "");
+
+        storage.delete_run("run_2").unwrap();
+        storage.delete_build("build_1").unwrap();
+        assert!(storage.get_build("build_1").unwrap().is_none());
+        assert!(!source_dir.exists());
+    }
+
+    #[test]
+    fn rejects_unsafe_build_source_dir_ids() {
+        let sources_dir = Path::new("/tmp/buildsvc-sources");
+        assert!(build_source_dir(sources_dir, "build_123").is_ok());
+        assert!(build_source_dir(sources_dir, "../build_123").is_err());
+        assert!(build_source_dir(sources_dir, "build/123").is_err());
+        assert!(build_source_dir(sources_dir, r"build\123").is_err());
+        assert!(build_source_dir(sources_dir, "").is_err());
     }
 }

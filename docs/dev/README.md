@@ -18,3 +18,6 @@
 | 1 | 2026-06-26 | L3 | research | [1-research-buildsvc-mvp.md](1-research-buildsvc-mvp.md) | 已完成 | Rust 自研轻量构建分发系统 MVP 调研。 |
 | 1 | 2026-06-26 | L3 | plan | [1-plan-buildsvc-mvp.md](1-plan-buildsvc-mvp.md) | 已完成 | Rust 自研轻量构建分发系统 MVP 实施计划。 |
 | 1 | 2026-06-26 | L3 | summary | [1-summary-buildsvc-mvp.md](1-summary-buildsvc-mvp.md) | 已完成 | Rust 自研轻量构建分发系统 MVP 实现、验证和残余风险总结。 |
+| 2 | 2026-06-26 | L3 | task | [2-task-run-delete.md](2-task-run-delete.md) | 已完成 | Runs 多选删除、agent 工作区清理确认和 server 记录删除。 |
+| 3 | 2026-06-26 | L2 | task | [3-task-build-delete.md](3-task-build-delete.md) | 已完成 | Builds 多选删除 server 源码包和 build 记录。 |
+| 4 | 2026-06-26 | L3 | task | [4-task-agent-terminal.md](4-task-agent-terminal.md) | 已完成 | Agent Web 终端，基于 PTY 和 WebSocket 转发输入输出。 |

@@ -52,6 +52,7 @@ pub struct ServerConfig {
     pub script_timeout_sec: u64,
     pub kill_grace_sec: u64,
     pub max_upload_size_mb: u64,
+    pub terminal_enabled: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -66,6 +67,10 @@ pub struct AgentConfig {
     pub heartbeat_sec: u64,
     pub script_timeout_sec: u64,
     pub kill_grace_sec: u64,
+    pub terminal_enabled: bool,
+    pub terminal_shell: Option<String>,
+    pub terminal_work_dir: PathBuf,
+    pub terminal_max_sessions: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -219,6 +224,7 @@ fn parse_server_config(
         script_timeout_sec: parse_u64(section, "script_timeout_sec", 7200)?,
         kill_grace_sec: parse_u64(section, "kill_grace_sec", 10)?,
         max_upload_size_mb: parse_u64(section, "max_upload_size_mb", 2048)?,
+        terminal_enabled: parse_bool(optional(section, "terminal_enabled").unwrap_or("false"))?,
     })
 }
 
@@ -231,19 +237,27 @@ fn parse_agent_config(
         bail!("[agent].labels must not be empty");
     }
 
+    let work_dir = optional(section, "work_dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| core.data_dir.join("work"));
+
     Ok(AgentConfig {
         server_url: required(section, "server_url")?.to_owned(),
         name: required(section, "name")?.to_owned(),
         token: required(section, "token")?.to_owned(),
         advertise_ip: optional(section, "advertise_ip").map(ToOwned::to_owned),
         labels,
-        work_dir: optional(section, "work_dir")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| core.data_dir.join("work")),
+        work_dir: work_dir.clone(),
         concurrency: parse_usize(section, "concurrency", 1)?.max(1),
         heartbeat_sec: parse_u64(section, "heartbeat_sec", 5)?,
         script_timeout_sec: parse_u64(section, "script_timeout_sec", 7200)?,
         kill_grace_sec: parse_u64(section, "kill_grace_sec", 10)?,
+        terminal_enabled: parse_bool(optional(section, "terminal_enabled").unwrap_or("false"))?,
+        terminal_shell: optional(section, "terminal_shell").map(ToOwned::to_owned),
+        terminal_work_dir: optional(section, "terminal_work_dir")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| work_dir.join("terminal")),
+        terminal_max_sessions: parse_usize(section, "terminal_max_sessions", 1)?.max(1),
     })
 }
 
@@ -427,5 +441,11 @@ mod tests {
         assert_eq!(agent.work_dir, PathBuf::from("/tmp/buildsvc-agent/work"));
         assert_eq!(agent.concurrency, 1);
         assert_eq!(agent.heartbeat_sec, 5);
+        assert!(!agent.terminal_enabled);
+        assert_eq!(
+            agent.terminal_work_dir,
+            PathBuf::from("/tmp/buildsvc-agent/work/terminal")
+        );
+        assert_eq!(agent.terminal_max_sessions, 1);
     }
 }

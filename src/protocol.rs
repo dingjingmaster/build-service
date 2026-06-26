@@ -13,6 +13,7 @@ pub enum AgentToServer {
         platform: String,
         arch: String,
         concurrency: usize,
+        terminal_enabled: bool,
         version: String,
     },
     Heartbeat {
@@ -34,6 +35,23 @@ pub enum AgentToServer {
         run_id: String,
         exit_code: i32,
     },
+    RunDeleted {
+        run_id: String,
+        success: bool,
+        error: Option<String>,
+    },
+    TerminalStarted {
+        session_id: String,
+    },
+    TerminalOutput {
+        session_id: String,
+        data: String,
+    },
+    TerminalExit {
+        session_id: String,
+        exit_code: Option<i32>,
+        message: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +70,26 @@ pub enum ServerToAgent {
     RunCancel {
         run_id: String,
         reason: String,
+    },
+    RunDelete {
+        run_id: String,
+    },
+    TerminalStart {
+        session_id: String,
+        rows: u16,
+        cols: u16,
+    },
+    TerminalInput {
+        session_id: String,
+        data: String,
+    },
+    TerminalResize {
+        session_id: String,
+        rows: u16,
+        cols: u16,
+    },
+    TerminalClose {
+        session_id: String,
     },
 }
 
@@ -155,6 +193,7 @@ pub struct AgentView {
     pub current_runs: Vec<String>,
     pub last_seen: Option<i64>,
     pub enabled: bool,
+    pub terminal_enabled: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -90,6 +90,15 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       border-color: var(--bad);
       background: var(--bad);
     }
+    button.small {
+      min-height: 28px;
+      padding: 4px 8px;
+      font-size: 12px;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -101,6 +110,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       border: 1px solid var(--line);
       border-radius: 5px;
     }
+    .runs-scroll { height: 419px; }
     .table-scroll table { border: 0; }
     .table-scroll thead th {
       position: sticky;
@@ -121,6 +131,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
     th { color: var(--muted); font-size: 12px; font-weight: 700; }
     tr.selectable { cursor: pointer; }
     tr.selectable:hover { background: #f0f5fb; }
+    tr.selectable.selected { background: #e8f1fc; }
     .status {
       display: inline-flex;
       align-items: center;
@@ -174,18 +185,64 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       flex-direction: column;
     }
     .actions { display: flex; gap: 8px; flex-wrap: wrap; }
-    .build-source { width: 48%; }
-    .build-time { width: 30%; }
-    .build-status { width: 22%; }
-    .run-agent { width: 68%; }
-    .run-status { width: 32%; }
-    .agent-computer { width: 22%; }
-    .agent-user { width: 14%; }
-    .agent-ip { width: 16%; }
-    .agent-os { width: 12%; }
-    .agent-arch { width: 13%; }
-    .agent-running { width: 11%; }
-    .agent-status { width: 12%; }
+    .section-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+    .build-select { width: 38px; text-align: center; }
+    .build-source { width: 42%; }
+    .build-time { width: 32%; }
+    .build-status { width: 24%; }
+    .run-select { width: 38px; text-align: center; }
+    .run-agent { width: 62%; }
+    .run-status { width: 30%; }
+    .agent-computer { width: 20%; }
+    .agent-user { width: 13%; }
+    .agent-ip { width: 15%; }
+    .agent-os { width: 10%; }
+    .agent-arch { width: 10%; }
+    .agent-running { width: 9%; }
+    .agent-status { width: 10%; }
+    .agent-terminal { width: 13%; }
+    .terminal-panel {
+      position: fixed;
+      inset: 72px 24px 24px 24px;
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      border: 1px solid #243244;
+      border-radius: 6px;
+      background: #0b1220;
+      box-shadow: 0 16px 42px rgba(15, 23, 42, 0.35);
+    }
+    .terminal-panel.hidden { display: none; }
+    .terminal-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 12px;
+      border-bottom: 1px solid #243244;
+      color: #e5e7eb;
+      background: #111827;
+    }
+    .terminal-head .spacer { flex: 1; }
+    .terminal-output {
+      flex: 1;
+      min-height: 0;
+      margin: 0;
+      padding: 12px;
+      overflow: auto;
+      outline: none;
+      color: #d1e7d8;
+      background: #050a12;
+      font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
     @media (max-width: 920px) {
       main { grid-template-columns: 1fr; }
       .two { grid-template-columns: 1fr; }
@@ -221,10 +278,11 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       <section>
         <h2>Runs</h2>
         <div class="body">
-          <div class="table-scroll">
+          <div class="table-scroll runs-scroll">
             <table>
               <thead>
                 <tr>
+                  <th class="run-select"><input id="selectAllRuns" type="checkbox"></th>
                   <th class="run-agent">Computer / IP</th>
                   <th class="run-status">Status</th>
                 </tr>
@@ -240,10 +298,15 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
         <section>
           <h2>Builds</h2>
           <div class="body">
+            <div class="section-actions">
+              <button id="deleteBuildsBtn" class="danger" type="button" disabled>Delete Source</button>
+              <span id="selectedBuilds" class="muted"></span>
+            </div>
             <div class="table-scroll">
               <table>
                 <thead>
                   <tr>
+                    <th class="build-select"><input id="selectAllBuilds" type="checkbox"></th>
                     <th class="build-source">Source</th>
                     <th class="build-time">Uploaded</th>
                     <th class="build-status">Status</th>
@@ -268,6 +331,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
                     <th class="agent-arch">Arch</th>
                     <th class="agent-running">Tasks</th>
                     <th class="agent-status">Status</th>
+                    <th class="agent-terminal">Terminal</th>
                   </tr>
                 </thead>
                 <tbody id="agentsBody"></tbody>
@@ -282,6 +346,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
           <div class="actions">
             <button id="rerunBtn" class="secondary" type="button" disabled>Rerun</button>
             <button id="cancelBtn" class="danger" type="button" disabled>Cancel</button>
+            <button id="deleteBtn" class="danger" type="button" disabled>Delete</button>
             <span id="selectedRun" class="muted"></span>
           </div>
         </div>
@@ -289,9 +354,23 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       </section>
     </div>
   </main>
+  <div id="terminalPanel" class="terminal-panel hidden">
+    <div class="terminal-head">
+      <strong id="terminalTitle">Terminal</strong>
+      <span id="terminalStatus" class="muted">closed</span>
+      <span class="spacer"></span>
+      <button id="terminalCloseBtn" class="secondary small" type="button">Close</button>
+    </div>
+    <pre id="terminalOutput" class="terminal-output" tabindex="0"></pre>
+  </div>
   <script>
     let state = { agents: [], builds: [], runs: [] };
     let selectedRun = null;
+    let selectedRuns = new Set();
+    let selectedBuilds = new Set();
+    let terminalSocket = null;
+    let terminalBuffer = "";
+    let terminalAgent = null;
 
     const socketStatus = document.getElementById("socketStatus");
     const uploadForm = document.getElementById("uploadForm");
@@ -299,11 +378,21 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
     const agentChecks = document.getElementById("agentChecks");
     const agentsBody = document.getElementById("agentsBody");
     const buildsBody = document.getElementById("buildsBody");
+    const selectAllBuilds = document.getElementById("selectAllBuilds");
+    const deleteBuildsBtn = document.getElementById("deleteBuildsBtn");
+    const selectedBuildsEl = document.getElementById("selectedBuilds");
     const runsBody = document.getElementById("runsBody");
+    const selectAllRuns = document.getElementById("selectAllRuns");
     const logEl = document.getElementById("log");
     const selectedRunEl = document.getElementById("selectedRun");
     const rerunBtn = document.getElementById("rerunBtn");
     const cancelBtn = document.getElementById("cancelBtn");
+    const deleteBtn = document.getElementById("deleteBtn");
+    const terminalPanel = document.getElementById("terminalPanel");
+    const terminalTitle = document.getElementById("terminalTitle");
+    const terminalStatus = document.getElementById("terminalStatus");
+    const terminalOutput = document.getElementById("terminalOutput");
+    const terminalCloseBtn = document.getElementById("terminalCloseBtn");
 
     function status(value) {
       return `<span class="status ${escapeHtml(value)}">${escapeHtml(value)}</span>`;
@@ -366,30 +455,103 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
           <td>${escapeHtml(formatArch(agent.arch))}</td>
           <td>${agent.running}/${agent.capacity}</td>
           <td>${status(agent.status)}</td>
+          <td><button class="secondary small" type="button" data-terminal="${escapeHtml(agent.name)}" ${agent.terminal_enabled && agent.status !== "offline" ? "" : "disabled"}>Open</button></td>
         </tr>`).join("");
 
+      for (const button of agentsBody.querySelectorAll("button[data-terminal]")) {
+        button.addEventListener("click", () => openTerminal(button.dataset.terminal));
+      }
+
       const builds = [...state.builds].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
+      const buildIds = new Set(builds.map(build => build.id));
+      selectedBuilds = new Set([...selectedBuilds].filter(buildId => buildIds.has(buildId)));
       buildsBody.innerHTML = builds.map(build => `
-        <tr>
+        <tr class="selectable ${selectedBuilds.has(build.id) ? "selected" : ""}" data-build="${escapeHtml(build.id)}">
+          <td class="build-select"><input type="checkbox" name="buildSelect" value="${escapeHtml(build.id)}" ${selectedBuilds.has(build.id) ? "checked" : ""}></td>
           <td title="${escapeHtml(build.source_name)}">${escapeHtml(build.source_name)}</td>
           <td title="${escapeHtml(formatTime(build.created_at))}">${escapeHtml(formatTime(build.created_at))}</td>
           <td>${status(build.status)}</td>
         </tr>`).join("");
 
+      for (const checkbox of buildsBody.querySelectorAll("input[name='buildSelect']")) {
+        checkbox.addEventListener("click", event => event.stopPropagation());
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) {
+            selectedBuilds.add(checkbox.value);
+            clearRunSelection();
+          } else {
+            selectedBuilds.delete(checkbox.value);
+          }
+          render();
+        });
+      }
+
+      for (const row of buildsBody.querySelectorAll("tr[data-build]")) {
+        row.addEventListener("click", () => {
+          selectedBuilds = new Set([row.dataset.build]);
+          clearRunSelection();
+          render();
+        });
+      }
+
+      const runIds = new Set(state.runs.map(run => run.id));
+      selectedRuns = new Set([...selectedRuns].filter(runId => runIds.has(runId)));
+      if (selectedRun && !runIds.has(selectedRun)) {
+        selectedRun = null;
+        logEl.textContent = "";
+      }
+
       runsBody.innerHTML = state.runs.map(run => `
-        <tr class="selectable" data-run="${escapeHtml(run.id)}">
+        <tr class="selectable ${selectedRuns.has(run.id) ? "selected" : ""}" data-run="${escapeHtml(run.id)}">
+          <td class="run-select"><input type="checkbox" name="runSelect" value="${escapeHtml(run.id)}" ${selectedRuns.has(run.id) ? "checked" : ""}></td>
           <td title="${escapeHtml(run.agent_name)}">${escapeHtml(agentComputerIp(run.agent_name))}</td>
           <td>${status(run.status)}</td>
         </tr>`).join("");
 
-      for (const row of runsBody.querySelectorAll("tr[data-run]")) {
-        row.addEventListener("click", () => selectRun(row.dataset.run));
+      for (const checkbox of runsBody.querySelectorAll("input[name='runSelect']")) {
+        checkbox.addEventListener("click", event => event.stopPropagation());
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) {
+            selectedBuilds.clear();
+            selectedRuns.add(checkbox.value);
+            selectedRun = checkbox.value;
+          } else {
+            selectedRuns.delete(checkbox.value);
+          }
+          render();
+        });
       }
 
+      for (const row of runsBody.querySelectorAll("tr[data-run]")) {
+        row.addEventListener("click", () => {
+          selectedBuilds.clear();
+          selectedRuns = new Set([row.dataset.run]);
+          selectRun(row.dataset.run);
+        });
+      }
+
+      const selectedBuildCount = selectedBuilds.size;
+      selectedBuildsEl.textContent = selectedBuildCount > 0 ? `${selectedBuildCount} selected` : "";
+      deleteBuildsBtn.disabled = selectedBuildCount === 0;
+      selectAllBuilds.checked = builds.length > 0 && builds.every(build => selectedBuilds.has(build.id));
+      selectAllBuilds.indeterminate = selectedBuildCount > 0 && !selectAllBuilds.checked;
+
       const run = state.runs.find(item => item.id === selectedRun);
-      selectedRunEl.textContent = run ? `${run.id} on ${run.agent_name}` : "";
+      const selectedCount = selectedRuns.size;
+      selectedRunEl.textContent = run
+        ? `${run.id} on ${run.agent_name}${selectedCount > 1 ? ` · ${selectedCount} selected` : ""}`
+        : (selectedCount > 0 ? `${selectedCount} selected` : "");
       rerunBtn.disabled = !run || !["success", "failed", "lost", "canceled"].includes(run.status);
       cancelBtn.disabled = !run || !["queued", "assigned", "preparing", "running"].includes(run.status);
+      deleteBtn.disabled = selectedCount === 0;
+      selectAllRuns.checked = state.runs.length > 0 && state.runs.every(run => selectedRuns.has(run.id));
+      selectAllRuns.indeterminate = selectedCount > 0 && !selectAllRuns.checked;
+    }
+
+    function clearRunSelection() {
+      selectedRun = null;
+      selectedRuns.clear();
+      logEl.textContent = "";
     }
 
     async function selectRun(runId) {
@@ -430,6 +592,241 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
     cancelBtn.addEventListener("click", async () => {
       if (!selectedRun) return;
       await fetch(`/api/runs/${encodeURIComponent(selectedRun)}/cancel`, { method: "POST" });
+    });
+
+    async function deleteSelectedRuns() {
+      const runIds = [...selectedRuns];
+      if (runIds.length === 0) return;
+      if (!confirm(`Delete ${runIds.length} selected run${runIds.length === 1 ? "" : "s"}?`)) return;
+
+      deleteBtn.disabled = true;
+      const failures = [];
+      for (const runId of runIds) {
+        const response = await fetch(`/api/runs/${encodeURIComponent(runId)}`, { method: "DELETE" });
+        if (!response.ok) {
+          failures.push(`${runId}: ${await response.text()}`);
+          continue;
+        }
+        state = await response.json();
+        selectedRuns.delete(runId);
+      }
+      render();
+      if (failures.length > 0) {
+        alert(failures.join("\n"));
+      }
+    }
+
+    deleteBtn.addEventListener("click", deleteSelectedRuns);
+
+    async function deleteSelectedBuilds() {
+      const buildIds = [...selectedBuilds];
+      if (buildIds.length === 0) return;
+      if (!confirm(`Delete ${buildIds.length} selected source package${buildIds.length === 1 ? "" : "s"}?`)) return;
+
+      deleteBuildsBtn.disabled = true;
+      const failures = [];
+      for (const buildId of buildIds) {
+        const response = await fetch(`/api/builds/${encodeURIComponent(buildId)}`, { method: "DELETE" });
+        if (!response.ok) {
+          failures.push(`${buildId}: ${await response.text()}`);
+          continue;
+        }
+        state = await response.json();
+        selectedBuilds.delete(buildId);
+      }
+      render();
+      if (failures.length > 0) {
+        alert(failures.join("\n"));
+      }
+    }
+
+    deleteBuildsBtn.addEventListener("click", deleteSelectedBuilds);
+
+    selectAllBuilds.addEventListener("change", () => {
+      if (selectAllBuilds.checked) {
+        selectedBuilds = new Set(state.builds.map(build => build.id));
+        clearRunSelection();
+      } else {
+        selectedBuilds.clear();
+      }
+      render();
+    });
+
+    selectAllRuns.addEventListener("change", () => {
+      if (selectAllRuns.checked) {
+        selectedBuilds.clear();
+        selectedRuns = new Set(state.runs.map(run => run.id));
+      } else {
+        selectedRuns.clear();
+      }
+      render();
+    });
+
+    function encodeBase64Text(value) {
+      const bytes = new TextEncoder().encode(value);
+      let binary = "";
+      for (const byte of bytes) binary += String.fromCharCode(byte);
+      return btoa(binary);
+    }
+
+    function decodeBase64Text(value) {
+      const binary = atob(value);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return new TextDecoder().decode(bytes);
+    }
+
+    function terminalSize() {
+      const width = terminalOutput.clientWidth || 960;
+      const height = terminalOutput.clientHeight || 480;
+      return {
+        cols: Math.max(40, Math.min(300, Math.floor(width / 8))),
+        rows: Math.max(10, Math.min(200, Math.floor(height / 19)))
+      };
+    }
+
+    function sendTerminalResize() {
+      if (!terminalSocket || terminalSocket.readyState !== WebSocket.OPEN) return;
+      terminalSocket.send(JSON.stringify({ type: "resize", ...terminalSize() }));
+    }
+
+    function sendTerminalInput(value) {
+      if (!terminalSocket || terminalSocket.readyState !== WebSocket.OPEN || value === "") return;
+      terminalSocket.send(JSON.stringify({ type: "input", data: encodeBase64Text(value) }));
+    }
+
+    function cleanTerminalText(value) {
+      if (value.includes("\x1b[2J")) {
+        terminalBuffer = "";
+      }
+      return value
+        .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, "")
+        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n");
+    }
+
+    function appendTerminalText(value) {
+      for (const ch of cleanTerminalText(value)) {
+        if (ch === "\b" || ch === "\x7f") {
+          terminalBuffer = terminalBuffer.slice(0, -1);
+        } else {
+          terminalBuffer += ch;
+        }
+      }
+      if (terminalBuffer.length > 200000) {
+        terminalBuffer = terminalBuffer.slice(-160000);
+      }
+      terminalOutput.textContent = terminalBuffer;
+      terminalOutput.scrollTop = terminalOutput.scrollHeight;
+    }
+
+    function keyToTerminalInput(event) {
+      if (event.ctrlKey && !event.altKey && !event.metaKey && event.key.length === 1) {
+        const key = event.key.toLowerCase();
+        if (key === "v") return null;
+        return String.fromCharCode(key.toUpperCase().charCodeAt(0) - 64);
+      }
+      if (event.key === "Enter") return "\r";
+      if (event.key === "Backspace") return "\x7f";
+      if (event.key === "Tab") return "\t";
+      if (event.key === "Escape") return "\x1b";
+      if (event.key === "ArrowUp") return "\x1b[A";
+      if (event.key === "ArrowDown") return "\x1b[B";
+      if (event.key === "ArrowRight") return "\x1b[C";
+      if (event.key === "ArrowLeft") return "\x1b[D";
+      if (event.key === "Delete") return "\x1b[3~";
+      if (event.key === "Home") return "\x1b[H";
+      if (event.key === "End") return "\x1b[F";
+      if (!event.ctrlKey && !event.altKey && !event.metaKey && event.key.length === 1) return event.key;
+      return null;
+    }
+
+    function openTerminal(agentName) {
+      if (terminalSocket) {
+        closeTerminal();
+      }
+      terminalAgent = agentName;
+      terminalBuffer = "";
+      terminalOutput.textContent = "";
+      terminalTitle.textContent = `Terminal · ${agentName}`;
+      terminalStatus.textContent = "connecting";
+      terminalPanel.classList.remove("hidden");
+      terminalOutput.focus();
+
+      terminalSocket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/agents/${encodeURIComponent(agentName)}/terminal/ws`);
+      terminalSocket.onopen = () => {
+        terminalStatus.textContent = "connected";
+        sendTerminalResize();
+      };
+      terminalSocket.onclose = () => {
+        terminalStatus.textContent = "closed";
+        terminalSocket = null;
+      };
+      terminalSocket.onmessage = event => {
+        const message = JSON.parse(event.data);
+        if (message.type === "open") {
+          terminalStatus.textContent = "open";
+        } else if (message.type === "output") {
+          appendTerminalText(decodeBase64Text(message.data));
+        } else if (message.type === "exit") {
+          terminalStatus.textContent = message.exit_code === null || message.exit_code === undefined
+            ? "closed"
+            : `exit ${message.exit_code}`;
+          if (message.message) appendTerminalText(`\n${message.message}\n`);
+        } else if (message.type === "error") {
+          terminalStatus.textContent = "error";
+          appendTerminalText(`\n${message.message}\n`);
+        }
+      };
+    }
+
+    function closeTerminal() {
+      if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
+        terminalSocket.send(JSON.stringify({ type: "close" }));
+        terminalSocket.close();
+      } else if (terminalSocket) {
+        terminalSocket.close();
+      }
+      terminalSocket = null;
+      terminalAgent = null;
+      terminalPanel.classList.add("hidden");
+    }
+
+    terminalCloseBtn.addEventListener("click", closeTerminal);
+    terminalOutput.addEventListener("keydown", event => {
+      const data = keyToTerminalInput(event);
+      if (data === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      sendTerminalInput(data);
+    });
+    terminalOutput.addEventListener("paste", event => {
+      const text = event.clipboardData?.getData("text");
+      if (!text) return;
+      event.preventDefault();
+      sendTerminalInput(text);
+    });
+    window.addEventListener("resize", sendTerminalResize);
+
+    document.addEventListener("keydown", event => {
+      const target = event.target;
+      const tag = target && target.tagName ? target.tagName.toLowerCase() : "";
+      const inputType = tag === "input" ? (target.getAttribute("type") || "text").toLowerCase() : "";
+      const editing = tag === "textarea"
+        || tag === "select"
+        || target?.isContentEditable
+        || (tag === "input" && !["checkbox", "radio", "button", "submit"].includes(inputType));
+      if (event.key !== "Delete" || editing) {
+        return;
+      }
+      if (selectedBuilds.size === 0 && selectedRuns.size === 0) return;
+      event.preventDefault();
+      if (selectedBuilds.size > 0) {
+        deleteSelectedBuilds();
+      } else {
+        deleteSelectedRuns();
+      }
     });
 
     function connect() {
