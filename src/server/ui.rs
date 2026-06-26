@@ -348,8 +348,30 @@ const INDEX_HTML: &str = r#"<!doctype html>
       color: #d1e7d8;
       background: #050a12;
       font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      white-space: pre-wrap;
-      overflow-wrap: anywhere;
+      white-space: pre;
+      overflow-wrap: normal;
+      tab-size: 8;
+    }
+    .terminal-output .ansi-bold { font-weight: 700; }
+    .terminal-output .ansi-fg-black { color: #6b7280; }
+    .terminal-output .ansi-fg-red { color: #ef4444; }
+    .terminal-output .ansi-fg-green { color: #22c55e; }
+    .terminal-output .ansi-fg-yellow { color: #eab308; }
+    .terminal-output .ansi-fg-blue { color: #60a5fa; }
+    .terminal-output .ansi-fg-magenta { color: #e879f9; }
+    .terminal-output .ansi-fg-cyan { color: #22d3ee; }
+    .terminal-output .ansi-fg-white { color: #e5e7eb; }
+    .terminal-output .ansi-bg-black { background: #111827; }
+    .terminal-output .ansi-bg-red { background: #7f1d1d; }
+    .terminal-output .ansi-bg-green { background: #14532d; }
+    .terminal-output .ansi-bg-yellow { background: #713f12; }
+    .terminal-output .ansi-bg-blue { background: #1e3a8a; }
+    .terminal-output .ansi-bg-magenta { background: #701a75; }
+    .terminal-output .ansi-bg-cyan { background: #164e63; }
+    .terminal-output .ansi-bg-white { background: #f3f4f6; color: #111827; }
+    .terminal-cursor {
+      background: #d1e7d8;
+      color: #050a12;
     }
     @media (max-width: 920px) {
       header { flex-wrap: wrap; height: auto; min-height: 56px; padding: 10px 18px; }
@@ -524,8 +546,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let selectedSubmitAgents = new Set();
     let selectedUpgradeAgents = new Set();
     let terminalSocket = null;
-    let terminalBuffer = "";
     let terminalAgent = null;
+    let terminalLines = [[]];
+    let terminalFloors = [0];
+    let terminalRow = 0;
+    let terminalCol = 0;
+    let terminalStyle = "";
+    let terminalPending = "";
+    let terminalSuppressPromptErase = false;
+    let terminalSuppressTabEchoUntil = 0;
+    let terminalCols = 120;
     let activeTab = "build";
     let agentSort = { key: "computer_name", direction: "asc" };
     let runSort = { key: "status", direction: "asc" };
@@ -1055,7 +1085,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
       state = result.state;
       const failed = result.failed.length > 0 ? ` · failed: ${result.failed.join("; ")}` : "";
       upgradeResult.textContent = `${result.upgrade_id} sent to ${result.sent.join(", ")}${failed}`;
-      appendUpgradeLog(`[server] ${upgradeResult.textContent}\n`);
       selectedUpgradeAgents.clear();
       upgradeForm.reset();
       render();
@@ -1171,7 +1200,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
     function sendTerminalResize() {
       if (!terminalSocket || terminalSocket.readyState !== WebSocket.OPEN) return;
-      terminalSocket.send(JSON.stringify({ type: "resize", ...terminalSize() }));
+      const size = terminalSize();
+      terminalCols = size.cols;
+      terminalSocket.send(JSON.stringify({ type: "resize", ...size }));
     }
 
     function sendTerminalInput(value) {
@@ -1179,30 +1210,271 @@ const INDEX_HTML: &str = r#"<!doctype html>
       terminalSocket.send(JSON.stringify({ type: "input", data: encodeBase64Text(value) }));
     }
 
-    function cleanTerminalText(value) {
-      if (value.includes("\x1b[2J")) {
-        terminalBuffer = "";
+    function resetTerminalBuffer() {
+      terminalLines = [[]];
+      terminalFloors = [0];
+      terminalRow = 0;
+      terminalCol = 0;
+      terminalStyle = "";
+      terminalPending = "";
+      terminalSuppressPromptErase = false;
+      terminalSuppressTabEchoUntil = 0;
+      terminalCols = terminalSize().cols;
+      terminalOutput.innerHTML = "";
+    }
+
+    function ensureTerminalLine(row = terminalRow) {
+      while (terminalLines.length <= row) {
+        terminalLines.push([]);
+        terminalFloors.push(0);
       }
-      return value
-        .replace(/\x1b\][^\x07]*(\x07|\x1b\\)/g, "")
-        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
-        .replace(/\r\n/g, "\n")
-        .replace(/\r/g, "\n");
+    }
+
+    function trimTerminalScrollback() {
+      const maxLines = 2000;
+      if (terminalLines.length <= maxLines) return;
+      const extra = terminalLines.length - maxLines;
+      terminalLines.splice(0, extra);
+      terminalFloors.splice(0, extra);
+      terminalRow = Math.max(0, terminalRow - extra);
+    }
+
+    function terminalLineText(row = terminalRow) {
+      ensureTerminalLine(row);
+      return terminalLines[row].map(cell => cell ? cell.ch : " ").join("");
+    }
+
+    function updateTerminalPromptFloor() {
+      const text = terminalLineText();
+      if (/[$#>] $/.test(text)) {
+        terminalFloors[terminalRow] = Math.max(terminalFloors[terminalRow] || 0, terminalCol);
+        if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
+          terminalStatus.textContent = "ready";
+        }
+      }
+    }
+
+    function terminalStyleClass() {
+      return terminalStyle;
+    }
+
+    function sgrColorClass(offset, bright) {
+      const colors = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
+      const name = colors[offset] || "white";
+      return bright ? `ansi-fg-${name} ansi-bold` : `ansi-fg-${name}`;
+    }
+
+    function sgrBgClass(offset) {
+      const colors = ["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"];
+      return `ansi-bg-${colors[offset] || "black"}`;
+    }
+
+    function applyTerminalSgr(params) {
+      const values = params.length === 0 ? [0] : params.map(value => value === "" ? 0 : Number(value));
+      let bold = terminalStyle.includes("ansi-bold");
+      let fg = (terminalStyle.match(/ansi-fg-\w+/) || [""])[0];
+      let bg = (terminalStyle.match(/ansi-bg-\w+/) || [""])[0];
+
+      for (let index = 0; index < values.length; index += 1) {
+        const value = values[index];
+        if (value === 0) {
+          bold = false; fg = ""; bg = "";
+        } else if (value === 1) {
+          bold = true;
+        } else if (value === 22) {
+          bold = false;
+        } else if (value === 39) {
+          fg = "";
+        } else if (value === 49) {
+          bg = "";
+        } else if (value >= 30 && value <= 37) {
+          fg = `ansi-fg-${["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"][value - 30]}`;
+        } else if (value >= 90 && value <= 97) {
+          fg = `ansi-fg-${["black", "red", "green", "yellow", "blue", "magenta", "cyan", "white"][value - 90]}`;
+          bold = true;
+        } else if (value >= 40 && value <= 47) {
+          bg = sgrBgClass(value - 40);
+        } else if (value === 38 && values[index + 1] === 5) {
+          const color = values[index + 2];
+          if (color >= 0 && color <= 7) fg = sgrColorClass(color, false);
+          if (color >= 8 && color <= 15) fg = sgrColorClass(color - 8, true);
+          index += 2;
+        } else if (value === 48 && values[index + 1] === 5) {
+          const color = values[index + 2];
+          if (color >= 0 && color <= 7) bg = sgrBgClass(color);
+          if (color >= 8 && color <= 15) bg = sgrBgClass(color - 8);
+          index += 2;
+        }
+      }
+
+      terminalStyle = [bold ? "ansi-bold" : "", fg, bg].filter(Boolean).join(" ");
+    }
+
+    function clearTerminalScreen() {
+      terminalLines = [[]];
+      terminalFloors = [0];
+      terminalRow = 0;
+      terminalCol = 0;
+    }
+
+    function handleTerminalCsi(rawParams, final) {
+      const cleanParams = rawParams.replace(/^[?=>]/, "");
+      const params = cleanParams === "" ? [] : cleanParams.split(";");
+      const nums = params.map(value => value === "" ? 0 : Number(value));
+      ensureTerminalLine();
+
+      if (final === "m") {
+        applyTerminalSgr(params);
+      } else if (final === "A") {
+        terminalRow = Math.max(0, terminalRow - (nums[0] || 1));
+      } else if (final === "B") {
+        terminalRow += nums[0] || 1;
+        ensureTerminalLine();
+      } else if (final === "C") {
+        terminalCol = Math.min(terminalCols - 1, terminalCol + (nums[0] || 1));
+      } else if (final === "D") {
+        terminalCol = Math.max(terminalFloors[terminalRow] || 0, terminalCol - (nums[0] || 1));
+      } else if (final === "G") {
+        terminalCol = Math.max(0, Math.min(terminalCols - 1, (nums[0] || 1) - 1));
+      } else if (final === "H" || final === "f") {
+        terminalRow = Math.max(0, (nums[0] || 1) - 1);
+        terminalCol = Math.max(0, Math.min(terminalCols - 1, (nums[1] || 1) - 1));
+        ensureTerminalLine();
+      } else if (final === "J") {
+        if ((nums[0] || 0) === 2 || (nums[0] || 0) === 3) clearTerminalScreen();
+      } else if (final === "K") {
+        const mode = nums[0] || 0;
+        const line = terminalLines[terminalRow];
+        if (mode === 0) {
+          line.length = terminalCol;
+        } else if (mode === 1) {
+          for (let col = 0; col <= terminalCol; col += 1) line[col] = { ch: " ", style: terminalStyleClass() };
+        } else if (mode === 2) {
+          terminalLines[terminalRow] = [];
+          terminalFloors[terminalRow] = 0;
+          terminalCol = 0;
+        }
+      }
+    }
+
+    function terminalNewLine() {
+      terminalRow += 1;
+      terminalCol = 0;
+      ensureTerminalLine();
+      trimTerminalScrollback();
+    }
+
+    function writeTerminalChar(ch) {
+      ensureTerminalLine();
+      if (ch === "\n") {
+        terminalNewLine();
+        return;
+      }
+      if (ch === "\r") {
+        terminalCol = 0;
+        return;
+      }
+      if (ch === "\b") {
+        const floor = terminalFloors[terminalRow] || 0;
+        if (terminalCol > floor) {
+          terminalCol -= 1;
+        } else {
+          terminalSuppressPromptErase = true;
+        }
+        return;
+      }
+      if (ch === "\x7f") return;
+      if (ch === "\t") {
+        if (Date.now() <= terminalSuppressTabEchoUntil) {
+          terminalSuppressTabEchoUntil = 0;
+          return;
+        }
+        const spaces = 8 - (terminalCol % 8);
+        for (let index = 0; index < spaces; index += 1) writeTerminalChar(" ");
+        return;
+      }
+      if (ch < " ") return;
+      const floor = terminalFloors[terminalRow] || 0;
+      if (terminalSuppressPromptErase && ch === " " && terminalCol <= floor) {
+        terminalSuppressPromptErase = false;
+        return;
+      }
+      terminalSuppressPromptErase = false;
+      if (terminalCol >= terminalCols) terminalNewLine();
+      terminalLines[terminalRow][terminalCol] = { ch, style: terminalStyleClass() };
+      terminalCol += 1;
+      updateTerminalPromptFloor();
+    }
+
+    function renderTerminal() {
+      const showCursor = terminalSocket && terminalSocket.readyState === WebSocket.OPEN;
+      const html = terminalLines.map((line, rowIndex) => {
+        let output = "";
+        let currentStyle = null;
+        let chunk = "";
+        const flush = () => {
+          if (chunk === "") return;
+          const escaped = escapeHtml(chunk);
+          output += currentStyle ? `<span class="${escapeHtml(currentStyle)}">${escaped}</span>` : escaped;
+          chunk = "";
+        };
+        const width = showCursor && rowIndex === terminalRow
+          ? Math.max(line.length, terminalCol + 1)
+          : line.length;
+        for (let col = 0; col < width; col += 1) {
+          const cell = line[col];
+          const isCursor = showCursor && rowIndex === terminalRow && col === terminalCol;
+          const style = cell ? cell.style : "";
+          if (isCursor) {
+            flush();
+            const classes = ["terminal-cursor", style].filter(Boolean).join(" ");
+            output += `<span class="${escapeHtml(classes)}">${escapeHtml(cell ? cell.ch : " ")}</span>`;
+            continue;
+          }
+          if (style !== currentStyle) {
+            flush();
+            currentStyle = style;
+          }
+          chunk += cell ? cell.ch : " ";
+        }
+        flush();
+        return output;
+      }).join("\n");
+      terminalOutput.innerHTML = html;
+      terminalOutput.scrollTop = terminalOutput.scrollHeight;
     }
 
     function appendTerminalText(value) {
-      for (const ch of cleanTerminalText(value)) {
-        if (ch === "\b" || ch === "\x7f") {
-          terminalBuffer = terminalBuffer.slice(0, -1);
-        } else {
-          terminalBuffer += ch;
+      terminalPending += value;
+      let index = 0;
+      while (index < terminalPending.length) {
+        const ch = terminalPending[index];
+        if (ch === "\x1b") {
+          if (terminalPending[index + 1] === "]") {
+            const bell = terminalPending.indexOf("\x07", index + 2);
+            const st = terminalPending.indexOf("\x1b\\", index + 2);
+            const end = bell === -1 ? st : (st === -1 ? bell : Math.min(bell, st));
+            if (end === -1) break;
+            index = end + (terminalPending[end] === "\x1b" ? 2 : 1);
+            continue;
+          }
+          if (terminalPending[index + 1] === "[") {
+            let end = index + 2;
+            while (end < terminalPending.length && !/[@-~]/.test(terminalPending[end])) end += 1;
+            if (end >= terminalPending.length) break;
+            handleTerminalCsi(terminalPending.slice(index + 2, end), terminalPending[end]);
+            index = end + 1;
+            continue;
+          }
+          if (index + 1 >= terminalPending.length) break;
+          index += 2;
+          continue;
         }
+        writeTerminalChar(ch);
+        index += 1;
       }
-      if (terminalBuffer.length > 200000) {
-        terminalBuffer = terminalBuffer.slice(-160000);
-      }
-      terminalOutput.textContent = terminalBuffer;
-      terminalOutput.scrollTop = terminalOutput.scrollHeight;
+      terminalPending = terminalPending.slice(index);
+      renderTerminal();
     }
 
     function keyToTerminalInput(event) {
@@ -1211,9 +1483,17 @@ const INDEX_HTML: &str = r#"<!doctype html>
         if (key === "v") return null;
         return String.fromCharCode(key.toUpperCase().charCodeAt(0) - 64);
       }
-      if (event.key === "Enter") return "\r";
+      if (event.key === "Enter") {
+        if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
+          terminalStatus.textContent = "running";
+        }
+        return "\r";
+      }
       if (event.key === "Backspace") return "\x7f";
-      if (event.key === "Tab") return "\t";
+      if (event.key === "Tab") {
+        terminalSuppressTabEchoUntil = Date.now() + 500;
+        return "\t";
+      }
       if (event.key === "Escape") return "\x1b";
       if (event.key === "ArrowUp") return "\x1b[A";
       if (event.key === "ArrowDown") return "\x1b[B";
@@ -1231,8 +1511,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
         closeTerminal();
       }
       terminalAgent = agentId;
-      terminalBuffer = "";
-      terminalOutput.textContent = "";
+      resetTerminalBuffer();
       terminalTitle.textContent = `Terminal · ${agentComputerIp(agentId)}`;
       terminalStatus.textContent = "connecting";
       terminalPanel.classList.remove("hidden");
@@ -1244,8 +1523,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
         sendTerminalResize();
       };
       terminalSocket.onclose = () => {
+        const showDisconnect = terminalAgent !== null && !terminalPanel.classList.contains("hidden");
         terminalStatus.textContent = "closed";
         terminalSocket = null;
+        if (showDisconnect) {
+          appendTerminalText("\n[terminal disconnected]\n");
+        }
       };
       terminalSocket.onmessage = event => {
         const message = JSON.parse(event.data);
@@ -1258,6 +1541,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
             ? "closed"
             : `exit ${message.exit_code}`;
           if (message.message) appendTerminalText(`\n${message.message}\n`);
+          closeTerminal(false);
         } else if (message.type === "error") {
           terminalStatus.textContent = "error";
           appendTerminalText(`\n${message.message}\n`);
@@ -1265,9 +1549,11 @@ const INDEX_HTML: &str = r#"<!doctype html>
       };
     }
 
-    function closeTerminal() {
+    function closeTerminal(notifyAgent = true) {
       if (terminalSocket && terminalSocket.readyState === WebSocket.OPEN) {
-        terminalSocket.send(JSON.stringify({ type: "close" }));
+        if (notifyAgent) {
+          terminalSocket.send(JSON.stringify({ type: "close" }));
+        }
         terminalSocket.close();
       } else if (terminalSocket) {
         terminalSocket.close();

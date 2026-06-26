@@ -462,6 +462,7 @@ Important fields:
 - Agents generate their own ID and token and save them to `<data_dir>/agent.id` and `<data_dir>/agent.token`; the server records them when the agent connects.
 - `advertise_ip` can be set on multi-NIC machines when automatic IP detection is not what you want.
 - `terminal_enabled` must be enabled on both server and agent before the Web terminal can be opened.
+- `terminal_shell` defaults to bash on Linux when available, then `$SHELL` or `/bin/sh`; macOS uses `$SHELL` or `/bin/sh`; Windows uses `%COMSPEC%` or `cmd.exe`.
 - `upgrade_enabled` must be enabled on both server and agent before remote package upgrades can run.
 - `upgrade_work_dir` sets where agents download and extract upgrade packages.
 

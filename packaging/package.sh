@@ -114,12 +114,23 @@ EOF
 #!/bin/sh
 set -e
 
+restart_buildsvc_service() {
+    if [ -r /proc/$$/cgroup ] && grep -q 'buildsvc\.service' /proc/$$/cgroup; then
+        if command -v systemd-run >/dev/null 2>&1; then
+            systemd-run --unit="buildsvc-postinst-restart-$$" --collect --on-active=2s /bin/sh -c 'systemctl restart buildsvc.service' >/dev/null 2>&1 && return
+        fi
+        systemctl --no-block restart buildsvc.service >/dev/null 2>&1 || true
+        return
+    fi
+    systemctl restart buildsvc.service >/dev/null 2>&1 || true
+}
+
 case "$1" in
     configure)
         if command -v systemctl >/dev/null 2>&1; then
             systemctl daemon-reload >/dev/null 2>&1 || true
             systemctl enable buildsvc.service >/dev/null 2>&1 || true
-            systemctl restart buildsvc.service >/dev/null 2>&1 || true
+            restart_buildsvc_service
         fi
         ;;
 esac
@@ -206,10 +217,21 @@ mkdir -p %{buildroot}
 cp -a . %{buildroot}
 
 %post
+restart_buildsvc_service() {
+    if [ -r /proc/\$\$/cgroup ] && grep -q 'buildsvc\\.service' /proc/\$\$/cgroup; then
+        if command -v systemd-run >/dev/null 2>&1; then
+            systemd-run --unit="buildsvc-postinst-restart-\$\$" --collect --on-active=2s /bin/sh -c 'systemctl restart buildsvc.service' >/dev/null 2>&1 && return
+        fi
+        systemctl --no-block restart buildsvc.service >/dev/null 2>&1 || :
+        return
+    fi
+    systemctl restart buildsvc.service >/dev/null 2>&1 || :
+}
+
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload >/dev/null 2>&1 || :
     systemctl enable buildsvc.service >/dev/null 2>&1 || :
-    systemctl restart buildsvc.service >/dev/null 2>&1 || :
+    restart_buildsvc_service
 fi
 
 %preun
@@ -301,7 +323,14 @@ pkg_postinst() {
 	if command -v systemctl >/dev/null 2>&1; then
 		systemctl daemon-reload >/dev/null 2>&1 || true
 		systemctl enable buildsvc.service >/dev/null 2>&1 || true
-		systemctl restart buildsvc.service >/dev/null 2>&1 || true
+		if [[ -r /proc/\$\$/cgroup ]] && grep -q 'buildsvc\\.service' /proc/\$\$/cgroup; then
+			if command -v systemd-run >/dev/null 2>&1; then
+				systemd-run --unit="buildsvc-postinst-restart-\$\$" --collect --on-active=2s /bin/sh -c 'systemctl restart buildsvc.service' >/dev/null 2>&1 && return
+			fi
+			systemctl --no-block restart buildsvc.service >/dev/null 2>&1 || true
+		else
+			systemctl restart buildsvc.service >/dev/null 2>&1 || true
+		fi
 	fi
 }
 

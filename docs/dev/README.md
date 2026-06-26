@@ -26,3 +26,4 @@
 | 7 | 2026-06-26 | L2 | task | [7-task-web-ui-tabs.md](7-task-web-ui-tabs.md) | 已完成 | Web UI 拆分 Builds 和 Upgrades 两个 tab，编译和升级功能分区显示。 |
 | 8 | 2026-06-26 | L2 | task | [8-task-package-systemd-hooks.md](8-task-package-systemd-hooks.md) | 已完成 | deb/rpm/Gentoo 包安装、升级和卸载时自动管理 buildsvc systemd service。 |
 | 9 | 2026-06-26 | L2 | task | [9-task-agent-token-autogen.md](9-task-agent-token-autogen.md) | 已完成 | 移除 agent labels 配置和手工 token 配置，agent 首次启动自动生成 token。 |
+| 10 | 2026-06-26 | L3 | fix | [10-fix-buildsvc-self-restart.md](10-fix-buildsvc-self-restart.md) | 已完成 | 修复从 buildsvc Web 终端触发包配置时同步重启自身 service 导致命令挂起的问题。 |

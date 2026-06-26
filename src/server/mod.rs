@@ -45,6 +45,7 @@ use crate::{
 mod ui;
 
 const RUN_DELETE_TIMEOUT_SEC: u64 = 30;
+const UPGRADE_LOG_HISTORY_LIMIT: usize = 10_000;
 
 #[derive(Clone)]
 struct AppState {
@@ -61,6 +62,7 @@ struct RuntimeState {
     pending_deletes: HashMap<String, PendingDelete>,
     terminal_sessions: HashMap<String, TerminalSession>,
     upgrades: HashMap<String, UpgradePackage>,
+    upgrade_logs: Vec<UiMessage>,
 }
 
 struct AgentMetadata {
@@ -162,6 +164,7 @@ pub async fn run(core: CoreConfig, server: ServerConfig) -> anyhow::Result<()> {
             pending_deletes: HashMap::new(),
             terminal_sessions: HashMap::new(),
             upgrades: HashMap::new(),
+            upgrade_logs: Vec::new(),
         })),
         ui_tx,
     };
@@ -467,6 +470,21 @@ async fn upload_upgrade(
     }
 
     state.broadcast_state();
+    state.emit_upgrade_log(UiMessage::UpgradeLog {
+        agent_id: "server".to_owned(),
+        upgrade_id: upgrade_id.clone(),
+        stream: None,
+        seq: None,
+        data: format!(
+            "[server] {upgrade_id} sent to {}{}\n",
+            sent.join(", "),
+            if failed.is_empty() {
+                String::new()
+            } else {
+                format!(" · failed: {}", failed.join("; "))
+            }
+        ),
+    });
     Ok(JsonResponse(UpgradeResponse {
         state: state.ui_state()?,
         upgrade_id,
@@ -1074,7 +1092,7 @@ async fn handle_agent_message(state: &AppState, agent_id: &str, text: &str) -> a
                 }
                 _ => format!("[{agent_id}] {upgrade_state}\n"),
             };
-            let _ = state.ui_tx.send(UiMessage::UpgradeLog {
+            state.emit_upgrade_log(UiMessage::UpgradeLog {
                 agent_id: agent_id.to_owned(),
                 upgrade_id,
                 stream: None,
@@ -1091,7 +1109,7 @@ async fn handle_agent_message(state: &AppState, agent_id: &str, text: &str) -> a
         } => {
             let bytes = BASE64.decode(data)?;
             let text = String::from_utf8_lossy(&bytes).into_owned();
-            let _ = state.ui_tx.send(UiMessage::UpgradeLog {
+            state.emit_upgrade_log(UiMessage::UpgradeLog {
                 agent_id: agent_id.to_owned(),
                 upgrade_id,
                 stream: Some(stream),
@@ -1156,6 +1174,7 @@ async fn ui_ws(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl Into
 
 async fn handle_ui_ws(state: AppState, socket: WebSocket) {
     let (mut ws_tx, mut ws_rx) = socket.split();
+    let mut rx = state.ui_tx.subscribe();
     if let Ok(current) = state.ui_state() {
         let _ = ws_tx
             .send(Message::Text(
@@ -1165,8 +1184,16 @@ async fn handle_ui_ws(state: AppState, socket: WebSocket) {
             ))
             .await;
     }
+    let upgrade_logs = state.upgrade_log_history();
+    for message in upgrade_logs {
+        let Ok(text) = serde_json::to_string(&message) else {
+            continue;
+        };
+        if ws_tx.send(Message::Text(text.into())).await.is_err() {
+            return;
+        }
+    }
 
-    let mut rx = state.ui_tx.subscribe();
     loop {
         tokio::select! {
             message = rx.recv() => {
@@ -1401,6 +1428,26 @@ impl AppState {
                 let _ = self.ui_tx.send(UiMessage::State { state });
             }
             Err(err) => error!(%err, "failed to build ui state"),
+        }
+    }
+
+    fn upgrade_log_history(&self) -> Vec<UiMessage> {
+        let Ok(runtime) = self.runtime.lock() else {
+            return Vec::new();
+        };
+        runtime.upgrade_logs.clone()
+    }
+
+    fn emit_upgrade_log(&self, message: UiMessage) {
+        if matches!(&message, UiMessage::UpgradeLog { .. }) {
+            if let Ok(mut runtime) = self.runtime.lock() {
+                runtime.upgrade_logs.push(message.clone());
+                if runtime.upgrade_logs.len() > UPGRADE_LOG_HISTORY_LIMIT {
+                    let extra = runtime.upgrade_logs.len() - UPGRADE_LOG_HISTORY_LIMIT;
+                    runtime.upgrade_logs.drain(0..extra);
+                }
+            }
+            let _ = self.ui_tx.send(message);
         }
     }
 

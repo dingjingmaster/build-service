@@ -1074,6 +1074,45 @@ async fn install_deb(
     upgrade_id: &str,
     package_path: &Path,
 ) -> anyhow::Result<()> {
+    let first_result = run_deb_install(runtime, upgrade_id, package_path).await;
+    if first_result.is_ok() {
+        return Ok(());
+    }
+
+    let first_error = first_result.unwrap_err().to_string();
+    if !command_exists("dpkg") {
+        bail!(first_error);
+    }
+
+    send_upgrade_status(
+        runtime,
+        upgrade_id,
+        "recovering",
+        Some("dpkg --configure -a".to_owned()),
+    );
+    run_dpkg_configure(runtime, upgrade_id)
+        .await
+        .with_context(|| {
+            format!("deb install failed ({first_error}); dpkg --configure -a failed")
+        })?;
+
+    send_upgrade_status(
+        runtime,
+        upgrade_id,
+        "retrying",
+        Some("deb install".to_owned()),
+    );
+    run_deb_install(runtime, upgrade_id, package_path)
+        .await
+        .with_context(|| format!("deb install failed ({first_error}); retry failed"))?;
+    Ok(())
+}
+
+async fn run_deb_install(
+    runtime: &AgentRuntime,
+    upgrade_id: &str,
+    package_path: &Path,
+) -> anyhow::Result<()> {
     if command_exists("apt-get") {
         let mut command = Command::new("apt-get");
         command
@@ -1091,6 +1130,16 @@ async fn install_deb(
     } else {
         bail!("neither apt-get nor dpkg was found")
     }
+}
+
+async fn run_dpkg_configure(runtime: &AgentRuntime, upgrade_id: &str) -> anyhow::Result<()> {
+    let mut command = Command::new("dpkg");
+    command
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .arg("--force-confold")
+        .arg("--configure")
+        .arg("-a");
+    run_upgrade_command(runtime, upgrade_id, "dpkg --configure -a", command).await
 }
 
 async fn install_rpm(
@@ -1176,16 +1225,44 @@ async fn run_systemctl_daemon_reload(
 }
 
 async fn request_service_restart() -> anyhow::Result<()> {
+    if command_exists("systemd-run") {
+        let mut command = Command::new("systemd-run");
+        command
+            .arg(format!(
+                "--unit=buildsvc-upgrade-restart-{}",
+                Uuid::new_v4().simple()
+            ))
+            .arg("--collect")
+            .arg("--on-active=2s")
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg("systemctl restart buildsvc.service");
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match command.status().await {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => {
+                warn!(%status, "systemd-run restart scheduling failed; falling back to systemctl --no-block");
+            }
+            Err(err) => {
+                warn!(%err, "failed to spawn systemd-run restart scheduling; falling back to systemctl --no-block");
+            }
+        }
+    }
+
     let mut command = Command::new("systemctl");
     command
+        .arg("--no-block")
         .arg("restart")
-        .arg("buildsvc")
+        .arg("buildsvc.service")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     command
         .spawn()
-        .context("spawn systemctl restart buildsvc")?;
+        .context("spawn deferred systemctl restart buildsvc")?;
     Ok(())
 }
 
@@ -1359,9 +1436,15 @@ async fn start_terminal_session(
         pixel_width: 0,
         pixel_height: 0,
     })?;
-    let mut command = CommandBuilder::new(terminal_shell(&runtime.config));
+    let shell = terminal_shell(&runtime.config);
+    let terminal_rc = prepare_terminal_rc(&runtime.config, &shell).await?;
+    let mut command = terminal_command(&shell, terminal_rc.as_deref());
     command.cwd(runtime.config.terminal_work_dir.as_os_str());
+    command.env("SHELL", &shell);
     command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env("CLICOLOR", "1");
+    command.env("CLICOLOR_FORCE", "1");
 
     let mut child = pair.slave.spawn_command(command)?;
     let mut reader = pair.master.try_clone_reader()?;
@@ -1466,6 +1549,31 @@ async fn send_terminal_command(
     Ok(())
 }
 
+async fn prepare_terminal_rc(config: &AgentConfig, shell: &str) -> anyhow::Result<Option<PathBuf>> {
+    if !shell_uses_bash(&shell) {
+        return Ok(None);
+    }
+
+    let rc_path = config.terminal_work_dir.join(".buildsvc-terminal.bashrc");
+    fs::write(&rc_path, TERMINAL_BASHRC)
+        .await
+        .with_context(|| format!("write {}", rc_path.display()))?;
+    Ok(Some(rc_path))
+}
+
+fn terminal_command(shell: &str, rc_path: Option<&Path>) -> CommandBuilder {
+    let mut command = CommandBuilder::new(shell);
+    if shell_uses_bash(shell) {
+        if let Some(rc_path) = rc_path {
+            command.arg("--noprofile");
+            command.arg("--rcfile");
+            command.arg(rc_path.as_os_str());
+            command.arg("-i");
+        }
+    }
+    command
+}
+
 fn terminal_shell(config: &AgentConfig) -> String {
     if let Some(shell) = config
         .terminal_shell
@@ -1480,11 +1588,64 @@ fn terminal_shell(config: &AgentConfig) -> String {
     {
         std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_owned())
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
     {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())
+        for candidate in ["/bin/bash", "/usr/bin/bash"] {
+            if Path::new(candidate).is_file() {
+                return candidate.to_owned();
+            }
+        }
+        if command_exists("bash") {
+            return "bash".to_owned();
+        }
+        default_unix_shell()
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        default_unix_shell()
     }
 }
+
+#[cfg(unix)]
+fn default_unix_shell() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned())
+}
+
+fn shell_uses_bash(shell: &str) -> bool {
+    Path::new(shell)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.contains("bash"))
+}
+
+const TERMINAL_BASHRC: &str = r#"
+if [ -r "$HOME/.bashrc" ]; then
+    . "$HOME/.bashrc"
+fi
+
+export TERM="${TERM:-xterm-256color}"
+export COLORTERM="${COLORTERM:-truecolor}"
+export CLICOLOR=1
+export CLICOLOR_FORCE=1
+
+if command -v dircolors >/dev/null 2>&1; then
+    eval "$(dircolors -b)"
+fi
+
+if [ -r /usr/share/bash-completion/bash_completion ]; then
+    . /usr/share/bash-completion/bash_completion
+fi
+
+alias ls='ls --color=auto'
+alias grep='grep --color=auto'
+alias fgrep='fgrep --color=auto'
+alias egrep='egrep --color=auto'
+
+bind 'set completion-ignore-case on' 2>/dev/null || true
+bind 'set show-all-if-ambiguous on' 2>/dev/null || true
+bind 'set disable-completion off' 2>/dev/null || true
+bind '"\t": complete' 2>/dev/null || true
+"#;
 
 async fn cancel_all(runtime: AgentRuntime) {
     let mut runs = runtime.runs.lock().await;
