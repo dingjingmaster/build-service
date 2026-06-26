@@ -421,7 +421,7 @@ my-project/
   src/
 ```
 
-The agent extracts the archive into its run workspace and executes the script from the source root. On Linux/macOS it first makes `run-build.sh` executable. Exit code `0` means success; any non-zero exit code means failure. stdout and stderr are streamed to the server.
+The agent extracts the archive into its run workspace and executes the script from the source root. On Linux/macOS it first makes `run-build.sh` executable. Exit code `0` means success; any non-zero exit code means failure. After a successful script run, the agent deletes that `<work_dir>/runs/run_*` workspace. Failed, timed-out, or canceled runs are kept for inspection. On agent startup, historical `run_*` workspaces under `<work_dir>/runs` are cleaned automatically. stdout and stderr are streamed to the server.
 
 ## Configuration
 

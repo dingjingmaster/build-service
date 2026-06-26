@@ -433,6 +433,8 @@ agent 解包后会进入源码根目录执行脚本：
 - Linux/macOS：执行前会先给 `run-build.sh` 加执行权限。
 - Windows：执行 `run-build.bat`。
 - 脚本退出码为 `0` 时 run 标记为成功，非 `0` 时标记为失败。
+- 脚本成功后 agent 自动删除本次 `<work_dir>/runs/run_*` 工作区；脚本失败、超时或取消时保留现场。
+- agent 启动时会自动清理 `<work_dir>/runs` 下历史 `run_*` 工作区。
 - 脚本 stdout/stderr 会实时回传到 server，并在 Web UI 的 Run Log 中显示。
 
 ### 配置文件结构

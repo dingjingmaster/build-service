@@ -84,6 +84,14 @@ pub async fn run(core: CoreConfig, config: AgentConfig) -> anyhow::Result<()> {
     fs::create_dir_all(&config.work_dir)
         .await
         .with_context(|| format!("create {}", config.work_dir.display()))?;
+    let removed_runs = cleanup_run_work_dir(&config.work_dir).await;
+    if removed_runs > 0 {
+        info!(
+            dir = %config.work_dir.join("runs").display(),
+            count = removed_runs,
+            "cleaned stale run work entries"
+        );
+    }
     if config.terminal_enabled {
         fs::create_dir_all(&config.terminal_work_dir)
             .await
@@ -418,6 +426,22 @@ mod tests {
         assert!(run_work_dir(work_dir, "").is_err());
     }
 
+    #[tokio::test]
+    async fn cleanup_run_work_dir_removes_only_run_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let work_dir = temp.path().join("work");
+        std::fs::create_dir_all(work_dir.join("runs").join("run_old")).unwrap();
+        std::fs::write(work_dir.join("runs").join("run_file"), b"temp").unwrap();
+        std::fs::create_dir_all(work_dir.join("runs").join("manual")).unwrap();
+
+        let removed = cleanup_run_work_dir(&work_dir).await;
+
+        assert_eq!(removed, 2);
+        assert!(!work_dir.join("runs").join("run_old").exists());
+        assert!(!work_dir.join("runs").join("run_file").exists());
+        assert!(work_dir.join("runs").join("manual").exists());
+    }
+
     #[test]
     fn validates_upgrade_package_filename() {
         assert!(validate_upgrade_package_filename(UpgradePackageKind::Deb, "buildsvc.deb").is_ok());
@@ -690,9 +714,16 @@ async fn execute_run(
     )
     .await?;
 
-    runtime
-        .sender
-        .send(AgentToServer::RunFinished { run_id, exit_code })?;
+    runtime.sender.send(AgentToServer::RunFinished {
+        run_id: run_id.clone(),
+        exit_code,
+    })?;
+    if exit_code == 0 {
+        match remove_run_work_dir(&runtime.config.work_dir, &run_id).await {
+            Ok(()) => info!(run = %run_id, "cleaned successful run workspace"),
+            Err(err) => warn!(run = %run_id, %err, "failed to clean successful run workspace"),
+        }
+    }
     Ok(())
 }
 
@@ -932,7 +963,11 @@ async fn delete_run_workspace(runtime: &AgentRuntime, run_id: &str) -> anyhow::R
         bail!("run is active; cancel it before deleting");
     }
 
-    let run_dir = run_work_dir(&runtime.config.work_dir, run_id)?;
+    remove_run_work_dir(&runtime.config.work_dir, run_id).await
+}
+
+async fn remove_run_work_dir(work_dir: &Path, run_id: &str) -> anyhow::Result<()> {
+    let run_dir = run_work_dir(work_dir, run_id)?;
     match fs::remove_dir_all(&run_dir).await {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1099,12 +1134,20 @@ async fn download_upgrade_package(
     Ok(())
 }
 
+async fn cleanup_run_work_dir(work_dir: &Path) -> usize {
+    cleanup_prefixed_work_entries(&work_dir.join("runs"), "run_", "run").await
+}
+
 async fn cleanup_upgrade_work_dir(upgrade_work_dir: &Path) -> usize {
-    let mut entries = match fs::read_dir(upgrade_work_dir).await {
+    cleanup_prefixed_work_entries(upgrade_work_dir, "upgrade_", "upgrade").await
+}
+
+async fn cleanup_prefixed_work_entries(dir: &Path, prefix: &str, kind: &str) -> usize {
+    let mut entries = match fs::read_dir(dir).await {
         Ok(entries) => entries,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return 0,
         Err(err) => {
-            warn!(dir = %upgrade_work_dir.display(), %err, "read upgrade work dir failed");
+            warn!(dir = %dir.display(), %kind, %err, "read work dir failed");
             return 0;
         }
     };
@@ -1115,7 +1158,7 @@ async fn cleanup_upgrade_work_dir(upgrade_work_dir: &Path) -> usize {
             Ok(Some(entry)) => entry,
             Ok(None) => break,
             Err(err) => {
-                warn!(dir = %upgrade_work_dir.display(), %err, "read upgrade work entry failed");
+                warn!(dir = %dir.display(), %kind, %err, "read work entry failed");
                 break;
             }
         };
@@ -1123,7 +1166,7 @@ async fn cleanup_upgrade_work_dir(upgrade_work_dir: &Path) -> usize {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if !name.starts_with("upgrade_") {
+        if !name.starts_with(prefix) {
             continue;
         }
         let path = entry.path();
@@ -1131,14 +1174,14 @@ async fn cleanup_upgrade_work_dir(upgrade_work_dir: &Path) -> usize {
             Ok(file_type) if file_type.is_dir() => fs::remove_dir_all(&path).await,
             Ok(_) => fs::remove_file(&path).await,
             Err(err) => {
-                warn!(path = %path.display(), %err, "stat upgrade work entry failed");
+                warn!(path = %path.display(), %kind, %err, "stat work entry failed");
                 continue;
             }
         };
         match result {
             Ok(()) => removed += 1,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => warn!(path = %path.display(), %err, "remove upgrade work entry failed"),
+            Err(err) => warn!(path = %path.display(), %kind, %err, "remove work entry failed"),
         }
     }
     removed
