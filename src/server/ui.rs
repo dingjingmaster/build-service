@@ -1,4 +1,8 @@
-pub const INDEX_HTML: &str = r#"<!doctype html>
+pub fn index_html() -> String {
+    INDEX_HTML.replace("__BUILDSVC_VERSION__", env!("CARGO_PKG_VERSION"))
+}
+
+const INDEX_HTML: &str = r#"<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -35,6 +39,13 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       background: var(--panel);
     }
     h1 { font-size: 18px; margin: 0; letter-spacing: 0; }
+    .server-version {
+      margin-left: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
+      vertical-align: baseline;
+    }
     .tabs {
       display: flex;
       align-items: center;
@@ -86,6 +97,12 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       padding: 12px 14px;
       border-bottom: 1px solid var(--line);
       font-size: 14px;
+    }
+    .section-count {
+      margin-left: 4px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 600;
     }
     .body { padding: 14px; }
     .stack { display: grid; gap: 12px; align-content: start; }
@@ -153,6 +170,10 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       overflow: auto;
       border: 1px solid var(--line);
       border-radius: 5px;
+    }
+    .agents-table-scroll {
+      max-height: 268px;
+      overflow-y: auto;
     }
     .table-scroll table { border: 0; }
     .table-scroll thead th {
@@ -242,12 +263,11 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
     .run-select { width: 38px; text-align: center; }
     .run-agent { width: 62%; }
     .run-status { width: 30%; }
-    .agent-computer { width: 20%; }
-    .agent-user { width: 10%; }
-    .agent-ip { width: 13%; }
+    .agent-computer { width: 24%; }
+    .agent-ip { width: 15%; }
     .agent-os { width: 8%; }
     .agent-arch { width: 8%; }
-    .agent-version { width: 10%; }
+    .agent-version { width: 12%; }
     .agent-running { width: 8%; }
     .agent-status { width: 10%; }
     .agent-terminal { width: 13%; }
@@ -310,7 +330,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
 </head>
 <body>
   <header>
-    <h1>buildsvc</h1>
+    <h1>buildsvc <span class="server-version">v__BUILDSVC_VERSION__</span></h1>
     <nav class="tabs" aria-label="Views">
       <button id="buildTab" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="buildPanel">Builds</button>
       <button id="upgradeTab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="upgradePanel">Upgrades</button>
@@ -337,7 +357,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
             </form>
           </section>
           <section>
-            <h2>Runs</h2>
+            <h2>Runs <span id="runsCount" class="section-count">(0/0)</span></h2>
             <div class="body">
               <div class="table-scroll">
                 <table>
@@ -379,14 +399,13 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
               </div>
             </section>
             <section>
-              <h2>Agents</h2>
+              <h2>Agents <span id="agentsCount" class="section-count">(0/0)</span></h2>
               <div class="body">
-                <div class="table-scroll">
+                <div class="table-scroll agents-table-scroll">
                   <table>
                     <thead>
                       <tr>
                         <th class="agent-computer">Computer</th>
-                        <th class="agent-user">User</th>
                         <th class="agent-ip">IP</th>
                         <th class="agent-os">OS</th>
                         <th class="agent-arch">Arch</th>
@@ -483,12 +502,14 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
     const upgradeAgentChecks = document.getElementById("upgradeAgentChecks");
     const upgradeResult = document.getElementById("upgradeResult");
     const upgradeLog = document.getElementById("upgradeLog");
+    const agentsCount = document.getElementById("agentsCount");
     const agentsBody = document.getElementById("agentsBody");
     const buildsBody = document.getElementById("buildsBody");
     const selectAllBuilds = document.getElementById("selectAllBuilds");
     const deleteBuildsBtn = document.getElementById("deleteBuildsBtn");
     const selectedBuildsEl = document.getElementById("selectedBuilds");
     const runsBody = document.getElementById("runsBody");
+    const runsCount = document.getElementById("runsCount");
     const selectAllRuns = document.getElementById("selectAllRuns");
     const logEl = document.getElementById("log");
     const selectedRunEl = document.getElementById("selectedRun");
@@ -571,7 +592,16 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       ]);
     }
 
+    function isActiveRunStatus(value) {
+      return ["queued", "assigned", "preparing", "running"].includes(value);
+    }
+
     function render() {
+      const onlineAgents = state.agents.filter(agent => agent.status !== "offline").length;
+      const activeRuns = state.runs.filter(run => isActiveRunStatus(run.status)).length;
+      agentsCount.textContent = `(${onlineAgents}/${state.agents.length})`;
+      runsCount.textContent = `(${activeRuns}/${state.runs.length})`;
+
       agentChecks.innerHTML = state.agents.map(agent => `
         <label class="agent-item">
           <input type="checkbox" name="agent" value="${escapeHtml(agent.id)}">
@@ -599,7 +629,6 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       agentsBody.innerHTML = state.agents.map(agent => `
         <tr>
           <td title="${escapeHtml(display(agent.computer_name))}">${escapeHtml(display(agent.computer_name))}</td>
-          <td title="${escapeHtml(display(agent.username))}">${escapeHtml(display(agent.username))}</td>
           <td title="${escapeHtml(display(agent.ip))}">${escapeHtml(display(agent.ip))}</td>
           <td>${escapeHtml(formatOs(agent.platform))}</td>
           <td>${escapeHtml(formatArch(agent.arch))}</td>

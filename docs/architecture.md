@@ -288,7 +288,7 @@ Initial agent WebSocket message examples:
   "platform": "linux",
   "arch": "x86_64",
   "concurrency": 2,
-  "version": "0.2.0"
+  "version": "<buildsvc-version>"
 }
 ```
 

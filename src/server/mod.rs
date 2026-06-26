@@ -249,8 +249,8 @@ fn spawn_agent_timeout_monitor(state: AppState) {
     });
 }
 
-async fn index() -> Html<&'static str> {
-    Html(ui::INDEX_HTML)
+async fn index() -> Html<String> {
+    Html(ui::index_html())
 }
 
 async fn api_state(State(state): State<AppState>) -> Result<JsonResponse<UiState>, ApiError> {

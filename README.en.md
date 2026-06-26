@@ -57,7 +57,7 @@ Generated packages install:
 - If present: `/usr/share/doc/buildsvc/examples/server.ini`
 - If present: `/usr/share/doc/buildsvc/examples/agent.ini`
 
-The `/etc/buildsvc/buildsvc.ini` package config is selected from non-empty `configs/buildsvc.ini` first, then falls back to `packaging/buildsvc.ini`.
+The `/etc/buildsvc/buildsvc.ini` package config always comes from `configs/buildsvc.ini`. Packaging fails if that file is missing or empty.
 
 The default packaged `[core].role` is `agent`, so a typical agent host usually only needs `server_url`. The agent ID and token are generated on first start and saved to `<data_dir>/agent.id` and `<data_dir>/agent.token`.
 

@@ -49,11 +49,12 @@ gentoo_keywords() {
 }
 
 package_config_src() {
-    if [ -s "$ROOT_DIR/configs/buildsvc.ini" ]; then
-        echo "$ROOT_DIR/configs/buildsvc.ini"
-    else
-        echo "$ROOT_DIR/packaging/buildsvc.ini"
+    config="$ROOT_DIR/configs/buildsvc.ini"
+    if [ ! -s "$config" ]; then
+        echo "missing required package config: $config" >&2
+        exit 1
     fi
+    echo "$config"
 }
 
 install_examples() {

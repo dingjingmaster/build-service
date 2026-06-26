@@ -319,7 +319,8 @@ mod tests {
 
     #[test]
     fn hello_defaults_upgrade_capability() {
-        let message = r#"{
+        let message = format!(
+            r#"{{
             "type": "hello",
             "agent_id": "agent_123",
             "token": "secret",
@@ -330,11 +331,13 @@ mod tests {
             "arch": "x86_64",
             "concurrency": 1,
             "terminal_enabled": false,
-            "version": "0.2.0"
-        }"#;
+            "version": "{}"
+        }}"#,
+            env!("CARGO_PKG_VERSION")
+        );
         let AgentToServer::Hello {
             upgrade_enabled, ..
-        } = serde_json::from_str(message).unwrap()
+        } = serde_json::from_str(&message).unwrap()
         else {
             panic!("expected hello");
         };

@@ -57,7 +57,7 @@ cargo test
 - 如果存在：`/usr/share/doc/buildsvc/examples/server.ini`
 - 如果存在：`/usr/share/doc/buildsvc/examples/agent.ini`
 
-打包到 `/etc/buildsvc/buildsvc.ini` 的配置来源为：优先使用非空的 `configs/buildsvc.ini`，否则使用 `packaging/buildsvc.ini`。
+打包到 `/etc/buildsvc/buildsvc.ini` 的配置固定来自 `configs/buildsvc.ini`。如果该文件不存在或为空，打包会直接失败。
 
 默认安装配置的 `[core].role` 是 `agent`，常规 agent 机器安装后通常只需要修改 `server_url`。agent ID 和 token 会在首次启动时自动生成并保存到 `<data_dir>/agent.id` 和 `<data_dir>/agent.token`。
 
