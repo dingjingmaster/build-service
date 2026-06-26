@@ -52,10 +52,6 @@ script_timeout_sec = 7200
 kill_grace_sec = 10
 max_upload_size_mb = 2048
 
-[agent.linux-amd64-01]
-enabled = true
-```
-
 Recommended Linux agent configuration:
 
 ```ini
@@ -66,7 +62,6 @@ log_level = info
 
 [agent]
 server_url = ws://127.0.0.1:8080/api/agent/ws
-name = linux-amd64-01
 work_dir = /var/lib/buildsvc-agent/work
 concurrency = 2
 heartbeat_sec = 5
@@ -77,8 +72,7 @@ kill_grace_sec = 10
 Project-local examples:
 
 ```text
-configs/server.ini
-configs/agent.ini
+configs/buildsvc.ini
 configs/server.test.ini
 configs/agent.test.ini
 ```
@@ -233,7 +227,7 @@ The agent is responsible for:
 
 - connecting to the server
 - authenticating with its generated token
-- reporting name, computer name, IP, platform, concurrency, and current state
+- reporting generated agent id, computer name, IP, platform, concurrency, and current state
 - receiving assigned runs
 - downloading the source archive
 - extracting it into an isolated run directory
@@ -251,7 +245,7 @@ the first version.
 After uploading a source archive, the user can choose which agents should run
 the build.
 
-The UI selects targets by explicit agent names.
+The UI selects targets from the Agents list. The value sent to the server is the generated agent id, but the UI shows computer/IP/platform information instead of the id.
 
 Each selected agent creates a separate run.
 
@@ -289,12 +283,12 @@ Initial agent WebSocket message examples:
 ```json
 {
   "type": "hello",
-  "name": "linux-amd64-01",
+  "agent_id": "agent_0123456789abcdef",
   "token": "agent-generated-token",
   "platform": "linux",
   "arch": "x86_64",
   "concurrency": 2,
-  "version": "0.1.0"
+  "version": "0.2.0"
 }
 ```
 

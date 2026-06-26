@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentToServer {
     Hello {
-        name: String,
+        agent_id: String,
         token: String,
         computer_name: String,
         username: String,
@@ -230,7 +230,7 @@ pub enum UiMessage {
         data: String,
     },
     UpgradeLog {
-        agent_name: String,
+        agent_id: String,
         upgrade_id: String,
         data: String,
     },
@@ -245,7 +245,7 @@ pub struct UiState {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentView {
-    pub name: String,
+    pub id: String,
     pub computer_name: Option<String>,
     pub username: Option<String>,
     pub ip: Option<String>,
@@ -257,7 +257,6 @@ pub struct AgentView {
     pub capacity: usize,
     pub current_runs: Vec<String>,
     pub last_seen: Option<i64>,
-    pub enabled: bool,
     pub terminal_enabled: bool,
     pub upgrade_enabled: bool,
     pub upgrade_status: Option<String>,
@@ -276,7 +275,7 @@ pub struct BuildView {
 pub struct RunView {
     pub id: String,
     pub build_id: String,
-    pub agent_name: String,
+    pub agent_id: String,
     pub status: String,
     pub exit_code: Option<i32>,
     pub created_at: i64,
@@ -322,7 +321,7 @@ mod tests {
     fn hello_defaults_upgrade_capability() {
         let message = r#"{
             "type": "hello",
-            "name": "agent",
+            "agent_id": "agent_123",
             "token": "secret",
             "computer_name": "host",
             "username": "user",
@@ -331,7 +330,7 @@ mod tests {
             "arch": "x86_64",
             "concurrency": 1,
             "terminal_enabled": false,
-            "version": "0.1.0"
+            "version": "0.2.0"
         }"#;
         let AgentToServer::Hello {
             upgrade_enabled, ..

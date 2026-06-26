@@ -59,7 +59,7 @@ cargo test
 
 打包到 `/etc/buildsvc/buildsvc.ini` 的配置来源为：优先使用非空的 `configs/buildsvc.ini`，否则使用 `packaging/buildsvc.ini`。
 
-默认安装配置的 `[core].role` 是 `agent`，常规 agent 机器安装后通常只需要修改 `server_url`、`name` 等 agent 字段。agent token 会在首次启动时自动生成并保存到 `<data_dir>/agent.token`。
+默认安装配置的 `[core].role` 是 `agent`，常规 agent 机器安装后通常只需要修改 `server_url`。agent ID 和 token 会在首次启动时自动生成并保存到 `<data_dir>/agent.id` 和 `<data_dir>/agent.token`。
 
 #### Debian / Ubuntu / Linux Mint
 
@@ -158,7 +158,7 @@ echo 'app-admin/buildsvc ~amd64' | sudo tee /etc/portage/package.accept_keywords
 sudo env PORTDIR_OVERLAY="$PWD/target/package/gentoo-overlay" emerge -av app-admin/buildsvc
 ```
 
-安装后修改配置。默认安装配置的角色是 `agent`，通常只需要改 `server_url` 和 `name`：
+安装后修改配置。默认安装配置的角色是 `agent`，通常只需要改 `server_url`：
 
 ```bash
 sudoedit /etc/buildsvc/buildsvc.ini
@@ -241,7 +241,6 @@ log_level = info
 
 [agent]
 server_url = ws://SERVER_IP:8080/api/agent/ws
-name = windows-agent-1
 work_dir = C:\ProgramData\buildsvc\work
 concurrency = 1
 '@ | Set-Content -Encoding UTF8 "C:\ProgramData\buildsvc\buildsvc.ini"
@@ -462,21 +461,13 @@ agent 解包后会进入源码根目录执行脚本：
 | `terminal_enabled` | 是否允许 Web UI 打开 agent 终端 | `false` |
 | `upgrade_enabled` | 是否允许 Web UI 推送升级包 | `false` |
 
-server 可选预置已知 agent，并控制是否允许其连接：
-
-```ini
-[agent.local-linux]
-enabled = true
-```
-
-这里的 `local-linux` 必须与对应 agent 配置中的 `[agent].name` 一致。未预置的 agent 首次连接时会自动加入运行时列表，默认启用；agent token 由 agent 自动生成，server 在连接时登记并用于后续源码包/升级包下载校验。
+server 不需要预置 agent。agent 首次连接时会自动加入运行时列表；agent ID 和 token 均由 agent 自动生成，server 在连接时登记并用于后续源码包/升级包下载校验。
 
 #### `[agent]`
 
 | 字段 | 说明 | 默认值 |
 |------|------|--------|
 | `server_url` | server 的 agent WebSocket 地址，通常是 `ws://<server>/api/agent/ws` | 必填 |
-| `name` | agent 唯一名称；如果 server 预置了 `[agent.<name>]`，需要与其匹配 | 必填 |
 | `advertise_ip` | agent 上报给 UI 的 IP。多网卡机器建议显式配置 | 自动探测 |
 | `work_dir` | agent 工作目录 | `<data_dir>/work` |
 | `concurrency` | agent 本机并发 run 数 | `1` |
@@ -506,9 +497,6 @@ public_url = http://192.168.1.10:8080
 db_path = /var/lib/buildsvc/buildsvc.db
 terminal_enabled = false
 upgrade_enabled = false
-
-[agent.linux-a]
-enabled = true
 ```
 
 agent：
@@ -521,7 +509,6 @@ log_level = info
 
 [agent]
 server_url = ws://192.168.1.10:8080/api/agent/ws
-name = linux-a
 work_dir = /var/lib/buildsvc-agent/work
 concurrency = 1
 upgrade_enabled = false
@@ -541,7 +528,7 @@ upgrade_enabled = false
 ### 安全说明
 
 - 第一版 Web UI 无登录认证，建议只在可信局域网或受控网络内使用。
-- agent token 由 agent 自动生成并保存在 `<data_dir>/agent.token`，不要把该文件暴露给不可信用户。
+- agent ID 和 token 由 agent 自动生成并保存在 `<data_dir>/agent.id` 和 `<data_dir>/agent.token`，不要把这些文件暴露给不可信用户。
 - Web 终端等同于在 agent 机器上执行命令，默认关闭；仅在信任 server 和网络边界时启用。
 - 远程升级等同于允许 Web UI 在 agent 机器上安装系统包并重启 service，默认关闭；仅在可信网络和可信 server 上启用。
 - `public_url` 必须是 agent 可以访问的地址，不要只写 server 本机的 `127.0.0.1`，除非 agent 和 server 在同一台机器上。

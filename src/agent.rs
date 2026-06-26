@@ -41,12 +41,19 @@ use crate::{
 #[derive(Clone)]
 struct AgentRuntime {
     config: AgentConfig,
+    identity: AgentIdentity,
     client: Client,
     sender: mpsc::UnboundedSender<AgentToServer>,
     runs: Arc<Mutex<HashMap<String, RunControl>>>,
     terminal_sessions: Arc<Mutex<HashMap<String, TerminalControl>>>,
     upgrade: Arc<Mutex<Option<String>>>,
     semaphore: Arc<Semaphore>,
+}
+
+#[derive(Clone)]
+struct AgentIdentity {
+    id: String,
+    token: String,
 }
 
 struct RunControl {
@@ -64,11 +71,11 @@ enum TerminalCommand {
     Close,
 }
 
-pub async fn run(core: CoreConfig, mut config: AgentConfig) -> anyhow::Result<()> {
+pub async fn run(core: CoreConfig, config: AgentConfig) -> anyhow::Result<()> {
     fs::create_dir_all(&core.data_dir)
         .await
         .with_context(|| format!("create {}", core.data_dir.display()))?;
-    config.token = load_or_create_agent_token(&core.data_dir, &config.token).await?;
+    let identity = load_or_create_agent_identity(&core.data_dir).await?;
     fs::create_dir_all(&config.work_dir)
         .await
         .with_context(|| format!("create {}", config.work_dir.display()))?;
@@ -85,7 +92,7 @@ pub async fn run(core: CoreConfig, mut config: AgentConfig) -> anyhow::Result<()
     fs::create_dir_all(core.data_dir.join("tmp")).await.ok();
 
     loop {
-        match run_once(config.clone()).await {
+        match run_once(config.clone(), identity.clone()).await {
             Ok(()) => warn!("agent websocket closed"),
             Err(err) => warn!(%err, "agent websocket error"),
         }
@@ -93,7 +100,7 @@ pub async fn run(core: CoreConfig, mut config: AgentConfig) -> anyhow::Result<()
     }
 }
 
-async fn run_once(config: AgentConfig) -> anyhow::Result<()> {
+async fn run_once(config: AgentConfig, identity: AgentIdentity) -> anyhow::Result<()> {
     let (ws, _) = connect_async(&config.server_url)
         .await
         .with_context(|| format!("connect {}", config.server_url))?;
@@ -101,6 +108,7 @@ async fn run_once(config: AgentConfig) -> anyhow::Result<()> {
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<AgentToServer>();
     let runtime = AgentRuntime {
         config: config.clone(),
+        identity: identity.clone(),
         client: Client::new(),
         sender: out_tx.clone(),
         runs: Arc::new(Mutex::new(HashMap::new())),
@@ -110,9 +118,9 @@ async fn run_once(config: AgentConfig) -> anyhow::Result<()> {
     };
 
     out_tx.send(AgentToServer::Hello {
-        name: config.name.clone(),
-        token: config.token.clone(),
-        computer_name: computer_name(&config.name),
+        agent_id: identity.id.clone(),
+        token: identity.token.clone(),
+        computer_name: computer_name(),
         username: username(),
         ip: advertised_ip(&config),
         platform: std::env::consts::OS.to_owned(),
@@ -159,7 +167,16 @@ async fn run_once(config: AgentConfig) -> anyhow::Result<()> {
                     message => handle_server_message(runtime.clone(), message).await?,
                 }
             }
-            Message::Close(_) => break,
+            Message::Close(frame) => {
+                if let Some(frame) = frame {
+                    warn!(
+                        code = ?frame.code,
+                        reason = %frame.reason,
+                        "agent websocket closed by server"
+                    );
+                }
+                break;
+            }
             _ => {}
         }
     }
@@ -173,16 +190,19 @@ async fn run_once(config: AgentConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn load_or_create_agent_token(
-    data_dir: &Path,
-    configured_token: &str,
-) -> anyhow::Result<String> {
-    let configured_token = configured_token.trim();
-    if !configured_token.is_empty() {
-        return Ok(configured_token.to_owned());
-    }
+async fn load_or_create_agent_identity(data_dir: &Path) -> anyhow::Result<AgentIdentity> {
+    Ok(AgentIdentity {
+        id: load_or_create_secret_file(data_dir, "agent.id", "agent").await?,
+        token: load_or_create_secret_file(data_dir, "agent.token", "token").await?,
+    })
+}
 
-    let token_path = data_dir.join("agent.token");
+async fn load_or_create_secret_file(
+    data_dir: &Path,
+    filename: &str,
+    prefix: &str,
+) -> anyhow::Result<String> {
+    let token_path = data_dir.join(filename);
     let mut replace_empty_existing = false;
     match fs::read_to_string(&token_path).await {
         Ok(existing) => {
@@ -201,8 +221,8 @@ async fn load_or_create_agent_token(
     fs::create_dir_all(data_dir)
         .await
         .with_context(|| format!("create {}", data_dir.display()))?;
-    let token = format!("agent_{}", Uuid::new_v4().simple());
-    let tmp_path = data_dir.join("agent.token.tmp");
+    let token = format!("{prefix}_{}", Uuid::new_v4().simple());
+    let tmp_path = data_dir.join(format!("{filename}.tmp"));
     fs::write(&tmp_path, format!("{token}\n"))
         .await
         .with_context(|| format!("write {}", tmp_path.display()))?;
@@ -240,7 +260,7 @@ async fn set_private_permissions(_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn computer_name(fallback: &str) -> String {
+fn computer_name() -> String {
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
         .ok()
@@ -252,7 +272,7 @@ fn computer_name(fallback: &str) -> String {
                 .map(|value| value.trim().to_owned())
                 .filter(|value| !value.is_empty())
         })
-        .unwrap_or_else(|| fallback.to_owned())
+        .unwrap_or_else(|| "-".to_owned())
 }
 
 fn username() -> String {
@@ -656,8 +676,8 @@ async fn download_source(
     let response = runtime
         .client
         .get(source_url)
-        .header("x-agent-name", &runtime.config.name)
-        .header("x-agent-token", &runtime.config.token)
+        .header("x-agent-id", &runtime.identity.id)
+        .header("x-agent-token", &runtime.identity.token)
         .send()
         .await?
         .error_for_status()?;
@@ -1008,8 +1028,8 @@ async fn download_upgrade_package(
     let response = runtime
         .client
         .get(package_url)
-        .header("x-agent-name", &runtime.config.name)
-        .header("x-agent-token", &runtime.config.token)
+        .header("x-agent-id", &runtime.identity.id)
+        .header("x-agent-token", &runtime.identity.token)
         .send()
         .await?
         .error_for_status()?;

@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
                 .server
                 .clone()
                 .context("missing [server] configuration")?;
-            server::run(config.core, server, config.server_agents).await
+            server::run(config.core, server).await
         }
         config::Role::Agent => {
             let agent = config

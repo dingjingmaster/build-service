@@ -59,7 +59,7 @@ Generated packages install:
 
 The `/etc/buildsvc/buildsvc.ini` package config is selected from non-empty `configs/buildsvc.ini` first, then falls back to `packaging/buildsvc.ini`.
 
-The default packaged `[core].role` is `agent`, so a typical agent host usually only needs edits to fields such as `server_url` and `name`. The agent token is generated on first start and saved to `<data_dir>/agent.token`.
+The default packaged `[core].role` is `agent`, so a typical agent host usually only needs `server_url`. The agent ID and token are generated on first start and saved to `<data_dir>/agent.id` and `<data_dir>/agent.token`.
 
 ### Debian / Ubuntu / Linux Mint
 
@@ -152,7 +152,7 @@ echo 'app-admin/buildsvc ~amd64' | sudo tee /etc/portage/package.accept_keywords
 sudo env PORTDIR_OVERLAY="$PWD/target/package/gentoo-overlay" emerge -av app-admin/buildsvc
 ```
 
-Edit config after installation. The default packaged role is `agent`, so a normal agent host usually only needs `server_url` and `name`:
+Edit config after installation. The default packaged role is `agent`, so a normal agent host usually only needs `server_url`:
 
 ```bash
 sudoedit /etc/buildsvc/buildsvc.ini
@@ -235,7 +235,6 @@ log_level = info
 
 [agent]
 server_url = ws://SERVER_IP:8080/api/agent/ws
-name = windows-agent-1
 work_dir = C:\ProgramData\buildsvc\work
 concurrency = 1
 '@ | Set-Content -Encoding UTF8 "C:\ProgramData\buildsvc\buildsvc.ini"
@@ -440,9 +439,6 @@ public_url = http://192.168.1.10:8080
 db_path = /var/lib/buildsvc/buildsvc.db
 terminal_enabled = false
 upgrade_enabled = false
-
-[agent.linux-a]
-enabled = true
 ```
 
 Agent example:
@@ -455,7 +451,6 @@ log_level = info
 
 [agent]
 server_url = ws://192.168.1.10:8080/api/agent/ws
-name = linux-a
 work_dir = /var/lib/buildsvc-agent/work
 concurrency = 1
 upgrade_enabled = false
@@ -464,8 +459,7 @@ upgrade_enabled = false
 Important fields:
 
 - `public_url` must be reachable from agents, because agents download source archives from it.
-- `[agent.<name>]` on the server is optional, but when present it must match `[agent].name` on the agent.
-- Agents generate their own token and save it to `<data_dir>/agent.token`; the server records it when the agent connects.
+- Agents generate their own ID and token and save them to `<data_dir>/agent.id` and `<data_dir>/agent.token`; the server records them when the agent connects.
 - `advertise_ip` can be set on multi-NIC machines when automatic IP detection is not what you want.
 - `terminal_enabled` must be enabled on both server and agent before the Web terminal can be opened.
 - `upgrade_enabled` must be enabled on both server and agent before remote package upgrades can run.
@@ -474,6 +468,6 @@ Important fields:
 ## Security Notes
 
 - The first version has no Web UI login. Run it only on a trusted LAN or behind your own access control.
-- Agent tokens are generated automatically and stored in `<data_dir>/agent.token`; keep that file private.
+- Agent IDs and tokens are generated automatically and stored in `<data_dir>/agent.id` and `<data_dir>/agent.token`; keep those files private.
 - The Web terminal can execute commands on the agent machine. It is disabled by default and should stay disabled unless the network and server are trusted.
 - Remote upgrade can install system packages and restart services on the agent machine. It is disabled by default and should only be enabled on trusted networks and servers.

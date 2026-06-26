@@ -18,7 +18,7 @@
   - 启动时读取 INI 配置，根据 `role` 进入 server 或 agent。
   - 支持通过 `-c` / `--config` 指定配置文件；不指定时自动发现默认配置。
   - server 提供 Web UI，上传 `tar.gz`/`zip` 源码包。
-  - 用户按 agent 名选择目标 agent。
+  - 用户按 Agents 列表中的机器信息选择目标 agent。
   - agent 通过 WebSocket 连接 server，启动时自动上报最新计算机名，接收 run，下载源码包，解包并执行固定脚本。
   - server 实时显示 agent 状态、run 状态、日志和退出码。
   - server 支持删除 offline agent。
@@ -62,7 +62,7 @@
 ## 5. 产品规则
 
 - 权限规则：
-  - 每个 agent 自动生成并持久化独立 token。
+  - 每个 agent 自动生成并持久化独立 ID 和 token。
   - Web UI 第一版不登录，仅适合可信局域网。
 - 状态流转：
   - 正常：`queued -> assigned -> preparing -> running -> success/failed`。
@@ -80,8 +80,8 @@
   - 压缩包顶层必须只有一个目录。
 - 用户可见行为：
   - 日志实时追加展示。
-  - agent 选择只基于 agent 名。
-  - Agents 列表显示 agent 名、最新计算机名、状态和容量。
+  - agent 选择基于自动生成的内部 ID，UI 不展示该 ID。
+  - Agents 列表显示最新计算机名、IP、平台、架构、状态和容量。
   - Agents 列表排序为在线 agent 优先，离线 agent 靠后，同组内按计算机名排序。
   - offline agent 可从 server 运行时列表删除；删除后该 agent 不再显示，下一次连接会重新登记 token 并出现在列表中。
   - Runs 列表支持多选、全选和 Delete 键删除；删除仅对已结束 run 生效。

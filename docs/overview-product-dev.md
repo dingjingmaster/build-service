@@ -64,10 +64,10 @@
 | `/api/agents/{name}/terminal/ws` | browser | server | JSON text WebSocket | 为在线 agent 打开 PTY 终端会话并转发输入输出 |
 | `POST /api/builds` | browser | server | multipart form | 上传 source，传 target agents |
 | `POST /api/upgrades` | browser | server | multipart form | 上传 deb/rpm/Gentoo overlay 包并推送给在线 agent |
-| `GET /api/upgrades/{id}/package` | agent | server | agent name/token header | 下载已下发升级包 |
+| `GET /api/upgrades/{id}/package` | agent | server | agent id/token header | 下载已下发升级包 |
 | `DELETE /api/builds/{id}` | browser | server | build with no runs only | 删除 server 侧 source 目录和 build 记录 |
 | `DELETE /api/agents/{name}` | browser | server | offline agent only | 从 server 运行时 agent 列表删除离线 agent |
-| `GET /api/runs/{id}/source` | agent | server | agent name/token header | 下载已分配源码包 |
+| `GET /api/runs/{id}/source` | agent | server | agent id/token header | 下载已分配源码包 |
 | `GET /api/runs/{id}/log` | browser | server | text/plain | 读取 run 完整日志 |
 | `DELETE /api/runs/{id}` | browser | server | terminal run only | 请求对应在线 agent 删除工作区，确认后删除 run 记录和日志 |
 | `POST /api/runs/{id}/rerun` | browser | server | finished run only | 为同一 agent/source 新建 run |
@@ -77,7 +77,7 @@
 
 - 核心数据结构：
   - `builds`：build id、source name、archive format、source path、created_at、status。
-  - `runs`：run id、build id、agent name、status、exit_code、timestamps、source path、archive format、timeout。
+  - `runs`：run id、build id、agent id、status、exit_code、timestamps、source path、archive format、timeout。
 - 配置文件/参数：
   - 支持 `-c <path>` / `--config <path>` 指定 INI 配置文件。
   - 不指定配置参数时自动发现默认配置。
@@ -117,8 +117,8 @@
 - 迁移/兼容规则：
   - 第一版没有 schema migration 框架，仅 `CREATE TABLE IF NOT EXISTS`。
 - 敏感信息处理：
-  - agent token 由 agent 自动生成并保存到 `<agent_data_dir>/agent.token`。
-  - UI 不显示 token。
+  - agent id 和 token 由 agent 自动生成并保存到 `<agent_data_dir>/agent.id` 和 `<agent_data_dir>/agent.token`。
+  - UI 不显示 agent id 和 token。
 - Agent 状态：
   - agent hello 自动上报计算机名，优先读取 `COMPUTERNAME`、`HOSTNAME`，再读取 `/etc/hostname`，最后回退到 agent 配置名。
   - server 运行时保存最新计算机名；agent 离线后仍显示最新值，直到该 agent 被删除。

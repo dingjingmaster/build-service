@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     net::SocketAddr,
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -12,7 +12,7 @@ use axum::{
     body::Body,
     extract::{
         DefaultBodyLimit, Multipart, Path, State,
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Response},
@@ -33,7 +33,7 @@ use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
 
 use crate::{
-    config::{CoreConfig, ServerAgentConfig, ServerConfig},
+    config::{CoreConfig, ServerConfig},
     ids,
     protocol::{
         AgentToServer, AgentView, ArchiveFormat, LogStream, ServerToAgent, UiMessage, UiState,
@@ -56,7 +56,6 @@ struct AppState {
 
 struct RuntimeState {
     agents: HashMap<String, AgentRuntime>,
-    expected_agents: BTreeMap<String, ServerAgentConfig>,
     agent_tokens: HashMap<String, String>,
     agent_metadata: HashMap<String, AgentMetadata>,
     pending_deletes: HashMap<String, PendingDelete>,
@@ -74,7 +73,7 @@ struct AgentMetadata {
 }
 
 struct AgentRuntime {
-    name: String,
+    id: String,
     computer_name: String,
     username: String,
     ip: String,
@@ -91,12 +90,12 @@ struct AgentRuntime {
 }
 
 struct PendingDelete {
-    agent_name: String,
+    agent_id: String,
     sender: oneshot::Sender<Result<(), String>>,
 }
 
 struct TerminalSession {
-    agent_name: String,
+    agent_id: String,
     sender: mpsc::UnboundedSender<TerminalUiMessage>,
 }
 
@@ -119,7 +118,7 @@ struct UpgradeResponse {
 enum TerminalUiMessage {
     Open {
         session_id: String,
-        agent_name: String,
+        agent_id: String,
     },
     Output {
         data: String,
@@ -141,11 +140,7 @@ enum TerminalBrowserMessage {
     Close,
 }
 
-pub async fn run(
-    core: CoreConfig,
-    server: ServerConfig,
-    agents: BTreeMap<String, ServerAgentConfig>,
-) -> anyhow::Result<()> {
+pub async fn run(core: CoreConfig, server: ServerConfig) -> anyhow::Result<()> {
     let storage = Storage::open(core.data_dir.clone(), server.db_path.clone())?;
     let lost_on_start = storage.mark_active_runs_lost()?;
     if !lost_on_start.is_empty() {
@@ -162,7 +157,6 @@ pub async fn run(
         storage,
         runtime: Arc::new(Mutex::new(RuntimeState {
             agents: HashMap::new(),
-            expected_agents: agents,
             agent_tokens: HashMap::new(),
             agent_metadata: HashMap::new(),
             pending_deletes: HashMap::new(),
@@ -188,8 +182,8 @@ pub async fn run(
         .route("/api/runs/{run_id}", delete(delete_run))
         .route("/api/runs/{run_id}/rerun", post(rerun))
         .route("/api/runs/{run_id}/cancel", post(cancel))
-        .route("/api/agents/{agent_name}", delete(delete_agent))
-        .route("/api/agents/{agent_name}/terminal/ws", get(terminal_ws))
+        .route("/api/agents/{agent_id}", delete(delete_agent))
+        .route("/api/agents/{agent_id}/terminal/ws", get(terminal_ws))
         .route("/api/agent/ws", get(agent_ws))
         .route("/api/ui/ws", get(ui_ws))
         .layer(DefaultBodyLimit::max(max_upload))
@@ -242,13 +236,13 @@ fn spawn_agent_timeout_monitor(state: AppState) {
                     .agents
                     .values()
                     .filter(|agent| agent.last_seen < cutoff)
-                    .map(|agent| agent.name.clone())
+                    .map(|agent| agent.id.clone())
                     .collect::<Vec<_>>()
             };
 
-            for agent_name in stale_agents {
-                if let Err(err) = disconnect_agent(&state, &agent_name) {
-                    warn!(agent = %agent_name, %err, "failed to disconnect stale agent");
+            for agent_id in stale_agents {
+                if let Err(err) = disconnect_agent(&state, &agent_id) {
+                    warn!(agent = %agent_id, %err, "failed to disconnect stale agent");
                 }
             }
         }
@@ -283,7 +277,7 @@ async fn upload_build(
     let mut archive_format = None;
     let mut archive_path = None;
     let mut uploaded_size = 0_u64;
-    let mut target_agents = String::new();
+    let mut target_agent_ids = String::new();
 
     while let Some(mut field) = multipart.next_field().await? {
         let name = field.name().unwrap_or_default().to_owned();
@@ -307,7 +301,7 @@ async fn upload_build(
                 archive_path = Some(path);
             }
             "target_agents" => {
-                target_agents = field.text().await.unwrap_or_default();
+                target_agent_ids = field.text().await.unwrap_or_default();
             }
             _ => {}
         }
@@ -319,16 +313,16 @@ async fn upload_build(
     }
     let archive_format = archive_format.context("missing archive format")?;
     let archive_path = archive_path.context("missing archive path")?;
-    let selected = state.resolve_targets(&target_agents)?;
+    let selected = state.resolve_targets(&target_agent_ids)?;
     if selected.is_empty() {
         return Err(anyhow::anyhow!("no target agents selected").into());
     }
 
     let runs: Vec<NewRun> = selected
         .into_iter()
-        .map(|agent| NewRun {
+        .map(|agent_id| NewRun {
             id: ids::run_id(),
-            agent_name: agent.name,
+            agent_id,
             labels: Vec::new(),
             script_timeout_sec: state.server.script_timeout_sec,
         })
@@ -427,21 +421,21 @@ async fn upload_upgrade(
             },
         );
 
-        for agent_name in targets {
-            let Some(agent) = runtime.agents.get_mut(&agent_name) else {
-                failed.push(format!("{agent_name}: offline"));
+        for agent_id in targets {
+            let Some(agent) = runtime.agents.get_mut(&agent_id) else {
+                failed.push(format!("{agent_id}: offline"));
                 continue;
             };
             if !agent.upgrade_enabled {
-                failed.push(format!("{agent_name}: upgrade disabled"));
+                failed.push(format!("{agent_id}: upgrade disabled"));
                 continue;
             }
             if agent.platform != "linux" {
-                failed.push(format!("{agent_name}: package upgrades are Linux-only"));
+                failed.push(format!("{agent_id}: package upgrades are Linux-only"));
                 continue;
             }
             if !agent.running.is_empty() {
-                failed.push(format!("{agent_name}: active runs must finish first"));
+                failed.push(format!("{agent_id}: active runs must finish first"));
                 continue;
             }
             match agent.sender.send(ServerToAgent::UpgradeStart {
@@ -453,9 +447,9 @@ async fn upload_upgrade(
             }) {
                 Ok(()) => {
                     agent.upgrade_status = Some(format!("queued {upgrade_id}"));
-                    sent.push(agent_name);
+                    sent.push(agent_id);
                 }
-                Err(err) => failed.push(format!("{agent_name}: {err}")),
+                Err(err) => failed.push(format!("{agent_id}: {err}")),
             }
         }
     }
@@ -486,12 +480,12 @@ async fn download_source(
     Path(run_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let agent_name = header_value(&headers, "x-agent-name").context("missing x-agent-name")?;
+    let agent_id = header_value(&headers, "x-agent-id").context("missing x-agent-id")?;
     let token = header_value(&headers, "x-agent-token").context("missing x-agent-token")?;
-    state.verify_agent_token(agent_name, token)?;
+    state.verify_agent_token(agent_id, token)?;
 
     let run = state.storage.get_run(&run_id)?.context("run not found")?;
-    if run.agent_name != agent_name {
+    if run.agent_id != agent_id {
         return Err(anyhow::anyhow!("run is not assigned to this agent").into());
     }
     let bytes = fs::read(&run.source_path).await?;
@@ -513,9 +507,9 @@ async fn download_upgrade(
     Path(upgrade_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    let agent_name = header_value(&headers, "x-agent-name").context("missing x-agent-name")?;
+    let agent_id = header_value(&headers, "x-agent-id").context("missing x-agent-id")?;
     let token = header_value(&headers, "x-agent-token").context("missing x-agent-token")?;
-    state.verify_agent_token(agent_name, token)?;
+    state.verify_agent_token(agent_id, token)?;
 
     let package = {
         let runtime = state
@@ -583,7 +577,7 @@ async fn cancel(
             .runtime
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
-        if let Some(agent) = runtime.agents.get(&run.agent_name) {
+        if let Some(agent) = runtime.agents.get(&run.agent_id) {
             sent = agent
                 .sender
                 .send(ServerToAgent::RunCancel {
@@ -620,14 +614,14 @@ async fn delete_run(
         }
         let sender = runtime
             .agents
-            .get(&run.agent_name)
-            .with_context(|| format!("agent {} is offline", run.agent_name))?
+            .get(&run.agent_id)
+            .with_context(|| format!("agent {} is offline", run.agent_id))?
             .sender
             .clone();
         runtime.pending_deletes.insert(
             run_id.clone(),
             PendingDelete {
-                agent_name: run.agent_name.clone(),
+                agent_id: run.agent_id.clone(),
                 sender: ack_tx,
             },
         );
@@ -659,7 +653,7 @@ async fn delete_run(
             .runtime
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
-        if let Some(agent) = runtime.agents.get_mut(&run.agent_name) {
+        if let Some(agent) = runtime.agents.get_mut(&run.agent_id) {
             agent.running.remove(&run_id);
         }
     }
@@ -669,21 +663,23 @@ async fn delete_run(
 
 async fn delete_agent(
     State(state): State<AppState>,
-    Path(agent_name): Path<String>,
+    Path(agent_id): Path<String>,
 ) -> Result<JsonResponse<UiState>, ApiError> {
     {
         let mut runtime = state
             .runtime
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
-        if runtime.agents.contains_key(&agent_name) {
-            return Err(anyhow::anyhow!("agent {agent_name} is online").into());
+        if runtime.agents.contains_key(&agent_id) {
+            return Err(anyhow::anyhow!("agent {agent_id} is online").into());
         }
-        if runtime.expected_agents.remove(&agent_name).is_none() {
-            return Err(anyhow::anyhow!("agent {agent_name} not found").into());
+        if !runtime.agent_metadata.contains_key(&agent_id)
+            && !runtime.agent_tokens.contains_key(&agent_id)
+        {
+            return Err(anyhow::anyhow!("agent {agent_id} not found").into());
         }
-        runtime.agent_tokens.remove(&agent_name);
-        runtime.agent_metadata.remove(&agent_name);
+        runtime.agent_tokens.remove(&agent_id);
+        runtime.agent_metadata.remove(&agent_id);
     }
     state.broadcast_state();
     Ok(JsonResponse(state.ui_state()?))
@@ -691,21 +687,21 @@ async fn delete_agent(
 
 async fn terminal_ws(
     State(state): State<AppState>,
-    Path(agent_name): Path<String>,
+    Path(agent_id): Path<String>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_terminal_ws(state, agent_name, socket))
+    ws.on_upgrade(move |socket| handle_terminal_ws(state, agent_id, socket))
 }
 
-async fn handle_terminal_ws(state: AppState, agent_name: String, socket: WebSocket) {
-    if let Err(err) = terminal_ws_inner(state, agent_name, socket).await {
+async fn handle_terminal_ws(state: AppState, agent_id: String, socket: WebSocket) {
+    if let Err(err) = terminal_ws_inner(state, agent_id, socket).await {
         warn!(%err, "terminal websocket closed with error");
     }
 }
 
 async fn terminal_ws_inner(
     state: AppState,
-    agent_name: String,
+    agent_id: String,
     socket: WebSocket,
 ) -> anyhow::Result<()> {
     let (mut ws_tx, mut ws_rx) = socket.split();
@@ -729,16 +725,16 @@ async fn terminal_ws_inner(
             .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
         let agent = runtime
             .agents
-            .get(&agent_name)
-            .with_context(|| format!("agent {agent_name} is offline"))?;
+            .get(&agent_id)
+            .with_context(|| format!("agent {agent_id} is offline"))?;
         if !agent.terminal_enabled {
-            bail!("agent {agent_name} terminal is disabled");
+            bail!("agent {agent_id} terminal is disabled");
         }
         let sender = agent.sender.clone();
         runtime.terminal_sessions.insert(
             session_id.clone(),
             TerminalSession {
-                agent_name: agent_name.clone(),
+                agent_id: agent_id.clone(),
                 sender: terminal_tx.clone(),
             },
         );
@@ -756,7 +752,7 @@ async fn terminal_ws_inner(
 
     let _ = terminal_tx.send(TerminalUiMessage::Open {
         session_id: session_id.clone(),
-        agent_name: agent_name.clone(),
+        agent_id: agent_id.clone(),
     });
 
     let writer = tokio::spawn(async move {
@@ -834,7 +830,7 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
     };
     let hello: AgentToServer = serde_json::from_str(&first)?;
     let AgentToServer::Hello {
-        name,
+        agent_id,
         token,
         computer_name,
         username,
@@ -849,7 +845,16 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
     else {
         bail!("first agent message must be hello");
     };
-    state.accept_agent_token(&name, &token)?;
+    if let Err(err) = state.accept_agent_token(&agent_id, &token) {
+        let reason = truncate_close_reason(&err.to_string());
+        let _ = ws_tx
+            .send(Message::Close(Some(CloseFrame {
+                code: 1008,
+                reason: reason.into(),
+            })))
+            .await;
+        return Err(err);
+    }
 
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerToAgent>();
     {
@@ -858,9 +863,9 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
         runtime.agents.insert(
-            name.clone(),
+            agent_id.clone(),
             AgentRuntime {
-                name: name.clone(),
+                id: agent_id.clone(),
                 computer_name: computer_name.clone(),
                 username: username.clone(),
                 ip: ip.clone(),
@@ -877,7 +882,7 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
             },
         );
         runtime.agent_metadata.insert(
-            name.clone(),
+            agent_id.clone(),
             AgentMetadata {
                 computer_name: Some(computer_name),
                 username: Some(username),
@@ -910,8 +915,8 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
         let message = message?;
         match message {
             Message::Text(text) => {
-                if let Err(err) = handle_agent_message(&state, &name, &text).await {
-                    warn!(agent = %name, %err, "bad agent message");
+                if let Err(err) = handle_agent_message(&state, &agent_id, &text).await {
+                    warn!(agent = %agent_id, %err, "bad agent message");
                 }
             }
             Message::Close(_) => break,
@@ -920,15 +925,11 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
     }
 
     writer.abort();
-    disconnect_agent(&state, &name)?;
+    disconnect_agent(&state, &agent_id)?;
     Ok(())
 }
 
-async fn handle_agent_message(
-    state: &AppState,
-    agent_name: &str,
-    text: &str,
-) -> anyhow::Result<()> {
+async fn handle_agent_message(state: &AppState, agent_id: &str, text: &str) -> anyhow::Result<()> {
     let message: AgentToServer = serde_json::from_str(text)?;
     match message {
         AgentToServer::Hello { .. } => {}
@@ -941,13 +942,13 @@ async fn handle_agent_message(
                 .runtime
                 .lock()
                 .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
-            if let Some(agent) = runtime.agents.get_mut(agent_name) {
+            if let Some(agent) = runtime.agents.get_mut(agent_id) {
                 agent.last_seen = now_ts();
                 agent.concurrency = capacity.max(1);
                 agent.running = runs.into_iter().map(|run| run.run_id).collect();
                 if agent.running.len() != running {
                     warn!(
-                        agent = %agent_name,
+                        agent = %agent_id,
                         running,
                         reported = agent.running.len(),
                         "agent heartbeat running count mismatch"
@@ -985,7 +986,7 @@ async fn handle_agent_message(
                     .runtime
                     .lock()
                     .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
-                if let Some(agent) = runtime.agents.get_mut(agent_name) {
+                if let Some(agent) = runtime.agents.get_mut(agent_id) {
                     agent.running.remove(&run_id);
                     agent.last_seen = now_ts();
                 }
@@ -1006,13 +1007,13 @@ async fn handle_agent_message(
                 runtime.pending_deletes.remove(&run_id)
             };
             let Some(pending) = pending else {
-                warn!(agent = %agent_name, run = %run_id, "received unexpected run delete response");
+                warn!(agent = %agent_id, run = %run_id, "received unexpected run delete response");
                 return Ok(());
             };
-            if pending.agent_name != agent_name {
+            if pending.agent_id != agent_id {
                 let _ = pending.sender.send(Err(format!(
                     "delete response came from {}, expected {}",
-                    agent_name, pending.agent_name
+                    agent_id, pending.agent_id
                 )));
                 return Ok(());
             }
@@ -1025,16 +1026,16 @@ async fn handle_agent_message(
         }
         AgentToServer::TerminalStarted { session_id } => {
             state.send_terminal_ui(
-                agent_name,
+                agent_id,
                 &session_id,
                 TerminalUiMessage::Open {
                     session_id: session_id.clone(),
-                    agent_name: agent_name.to_owned(),
+                    agent_id: agent_id.to_owned(),
                 },
             )?;
         }
         AgentToServer::TerminalOutput { session_id, data } => {
-            state.send_terminal_ui(agent_name, &session_id, TerminalUiMessage::Output { data })?;
+            state.send_terminal_ui(agent_id, &session_id, TerminalUiMessage::Output { data })?;
         }
         AgentToServer::TerminalExit {
             session_id,
@@ -1042,7 +1043,7 @@ async fn handle_agent_message(
             message,
         } => {
             state.finish_terminal_session(
-                agent_name,
+                agent_id,
                 &session_id,
                 TerminalUiMessage::Exit { exit_code, message },
             )?;
@@ -1057,7 +1058,7 @@ async fn handle_agent_message(
                     .runtime
                     .lock()
                     .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
-                if let Some(agent) = runtime.agents.get_mut(agent_name) {
+                if let Some(agent) = runtime.agents.get_mut(agent_id) {
                     agent.last_seen = now_ts();
                     agent.upgrade_status = Some(match &message {
                         Some(message) if !message.is_empty() => {
@@ -1069,12 +1070,12 @@ async fn handle_agent_message(
             }
             let log = match message {
                 Some(message) if !message.is_empty() => {
-                    format!("[{agent_name}] {upgrade_state}: {message}\n")
+                    format!("[{agent_id}] {upgrade_state}: {message}\n")
                 }
-                _ => format!("[{agent_name}] {upgrade_state}\n"),
+                _ => format!("[{agent_id}] {upgrade_state}\n"),
             };
             let _ = state.ui_tx.send(UiMessage::UpgradeLog {
-                agent_name: agent_name.to_owned(),
+                agent_id: agent_id.to_owned(),
                 upgrade_id,
                 data: log,
             });
@@ -1089,12 +1090,12 @@ async fn handle_agent_message(
             let bytes = BASE64.decode(data)?;
             let text = String::from_utf8_lossy(&bytes).into_owned();
             let data = if matches!(stream, LogStream::Stderr) {
-                format!("[{agent_name} stderr] {text}")
+                format!("[{agent_id} stderr] {text}")
             } else {
-                format!("[{agent_name}] {text}")
+                format!("[{agent_id}] {text}")
             };
             let _ = state.ui_tx.send(UiMessage::UpgradeLog {
-                agent_name: agent_name.to_owned(),
+                agent_id: agent_id.to_owned(),
                 upgrade_id,
                 data,
             });
@@ -1103,19 +1104,17 @@ async fn handle_agent_message(
     Ok(())
 }
 
-fn disconnect_agent(state: &AppState, agent_name: &str) -> anyhow::Result<()> {
+fn disconnect_agent(state: &AppState, agent_id: &str) -> anyhow::Result<()> {
     let (pending_deletes, terminal_sessions) = {
         let mut runtime = state
             .runtime
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
-        runtime.agents.remove(agent_name);
+        runtime.agents.remove(agent_id);
         let pending_ids = runtime
             .pending_deletes
             .iter()
-            .filter_map(|(run_id, pending)| {
-                (pending.agent_name == agent_name).then(|| run_id.clone())
-            })
+            .filter_map(|(run_id, pending)| (pending.agent_id == agent_id).then(|| run_id.clone()))
             .collect::<Vec<_>>();
         let pending_deletes = pending_ids
             .into_iter()
@@ -1125,7 +1124,7 @@ fn disconnect_agent(state: &AppState, agent_name: &str) -> anyhow::Result<()> {
             .terminal_sessions
             .iter()
             .filter_map(|(session_id, session)| {
-                (session.agent_name == agent_name).then(|| session_id.clone())
+                (session.agent_id == agent_id).then(|| session_id.clone())
             })
             .collect::<Vec<_>>();
         let terminal_sessions = terminal_ids
@@ -1143,9 +1142,9 @@ fn disconnect_agent(state: &AppState, agent_name: &str) -> anyhow::Result<()> {
             message: Some("agent disconnected".to_owned()),
         });
     }
-    let lost = state.storage.mark_agent_runs_lost(agent_name)?;
+    let lost = state.storage.mark_agent_runs_lost(agent_id)?;
     if !lost.is_empty() {
-        warn!(agent = %agent_name, count = lost.len(), "marked runs lost after agent disconnect");
+        warn!(agent = %agent_id, count = lost.len(), "marked runs lost after agent disconnect");
     }
     state.dispatch_queued()?;
     state.broadcast_state();
@@ -1199,79 +1198,64 @@ async fn handle_ui_ws(state: AppState, socket: WebSocket) {
 }
 
 impl AppState {
-    fn accept_agent_token(&self, name: &str, token: &str) -> anyhow::Result<()> {
+    fn accept_agent_token(&self, agent_id: &str, token: &str) -> anyhow::Result<()> {
+        let agent_id = agent_id.trim();
+        if agent_id.is_empty() {
+            bail!("agent sent an empty id");
+        }
         let token = token.trim();
         if token.is_empty() {
-            bail!("agent {name} sent an empty token");
+            bail!("agent {agent_id} sent an empty token");
         }
 
         let mut runtime = self
             .runtime
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
-        let expected = runtime
-            .expected_agents
-            .entry(name.to_owned())
-            .or_insert_with(|| ServerAgentConfig {
-                name: name.to_owned(),
-                enabled: true,
-            });
-        if !expected.enabled {
-            bail!("agent {name} is disabled");
-        }
 
-        if let Some(existing) = runtime.agent_tokens.get(name) {
+        if let Some(existing) = runtime.agent_tokens.get(agent_id) {
             if existing != token {
-                bail!("invalid token for agent {name}");
+                bail!("invalid token for agent {agent_id}");
             }
         } else {
             runtime
                 .agent_tokens
-                .insert(name.to_owned(), token.to_owned());
+                .insert(agent_id.to_owned(), token.to_owned());
         }
         Ok(())
     }
 
-    fn verify_agent_token(&self, name: &str, token: &str) -> anyhow::Result<()> {
+    fn verify_agent_token(&self, agent_id: &str, token: &str) -> anyhow::Result<()> {
         let runtime = self
             .runtime
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
-        let expected = runtime
-            .expected_agents
-            .get(name)
-            .with_context(|| format!("unknown agent {name}"))?;
-        if !expected.enabled {
-            bail!("agent {name} is disabled");
-        }
         let expected_token = runtime
             .agent_tokens
-            .get(name)
-            .with_context(|| format!("agent {name} token is not registered"))?;
+            .get(agent_id)
+            .with_context(|| format!("agent {agent_id} token is not registered"))?;
         if expected_token != token.trim() {
-            bail!("invalid token for agent {name}");
+            bail!("invalid token for agent {agent_id}");
         }
         Ok(())
     }
 
-    fn resolve_targets(&self, target_agents: &str) -> anyhow::Result<Vec<ServerAgentConfig>> {
+    fn resolve_targets(&self, target_agents: &str) -> anyhow::Result<Vec<String>> {
         let runtime = self
             .runtime
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
         let mut selected = BTreeSet::new();
-        for name in split_csv(target_agents) {
-            if !runtime.expected_agents.contains_key(&name) {
-                bail!("unknown target agent {name}");
+        for agent_id in split_csv(target_agents) {
+            if !runtime.agents.contains_key(&agent_id)
+                && !runtime.agent_metadata.contains_key(&agent_id)
+            {
+                bail!("unknown target agent {agent_id}");
             }
-            selected.insert(name);
+            selected.insert(agent_id);
         }
 
-        Ok(selected
-            .into_iter()
-            .filter_map(|name| runtime.expected_agents.get(&name).cloned())
-            .filter(|agent| agent.enabled)
-            .collect())
+        Ok(selected.into_iter().collect())
     }
 
     fn dispatch_queued(&self) -> anyhow::Result<()> {
@@ -1282,7 +1266,7 @@ impl AppState {
             .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
 
         for run in queued {
-            let Some(agent) = runtime.agents.get_mut(&run.agent_name) else {
+            let Some(agent) = runtime.agents.get_mut(&run.agent_id) else {
                 continue;
             };
             if agent.running.len() >= agent.concurrency {
@@ -1306,7 +1290,7 @@ impl AppState {
                 archive_format: run.archive_format,
                 script_timeout_sec: run.script_timeout_sec,
             }) {
-                warn!(agent = %agent.name, run = %run.id, %err, "failed to send run_start");
+                warn!(agent = %agent.id, run = %run.id, %err, "failed to send run_start");
                 agent.running.remove(&run.id);
                 self.storage.update_run_status(&run.id, "queued")?;
             }
@@ -1320,11 +1304,14 @@ impl AppState {
             .lock()
             .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
         let mut agents = Vec::new();
+        let mut agent_ids = BTreeSet::new();
+        agent_ids.extend(runtime.agent_metadata.keys().cloned());
+        agent_ids.extend(runtime.agents.keys().cloned());
 
-        for expected in runtime.expected_agents.values() {
-            if let Some(live) = runtime.agents.get(&expected.name) {
+        for agent_id in agent_ids {
+            if let Some(live) = runtime.agents.get(&agent_id) {
                 agents.push(AgentView {
-                    name: expected.name.clone(),
+                    id: agent_id.clone(),
                     computer_name: Some(live.computer_name.clone()),
                     username: Some(live.username.clone()),
                     ip: Some(live.ip.clone()),
@@ -1340,44 +1327,42 @@ impl AppState {
                     capacity: live.concurrency,
                     current_runs: live.running.iter().cloned().collect(),
                     last_seen: Some(live.last_seen),
-                    enabled: expected.enabled,
                     terminal_enabled: self.server.terminal_enabled && live.terminal_enabled,
                     upgrade_enabled: self.server.upgrade_enabled && live.upgrade_enabled,
                     upgrade_status: live.upgrade_status.clone(),
                 });
             } else {
                 agents.push(AgentView {
-                    name: expected.name.clone(),
+                    id: agent_id.clone(),
                     computer_name: runtime
                         .agent_metadata
-                        .get(&expected.name)
+                        .get(&agent_id)
                         .and_then(|metadata| metadata.computer_name.clone()),
                     username: runtime
                         .agent_metadata
-                        .get(&expected.name)
+                        .get(&agent_id)
                         .and_then(|metadata| metadata.username.clone()),
                     ip: runtime
                         .agent_metadata
-                        .get(&expected.name)
+                        .get(&agent_id)
                         .and_then(|metadata| metadata.ip.clone()),
                     platform: runtime
                         .agent_metadata
-                        .get(&expected.name)
+                        .get(&agent_id)
                         .and_then(|metadata| metadata.platform.clone()),
                     arch: runtime
                         .agent_metadata
-                        .get(&expected.name)
+                        .get(&agent_id)
                         .and_then(|metadata| metadata.arch.clone()),
                     version: runtime
                         .agent_metadata
-                        .get(&expected.name)
+                        .get(&agent_id)
                         .and_then(|metadata| metadata.version.clone()),
                     status: "offline".to_owned(),
                     running: 0,
                     capacity: 0,
                     current_runs: Vec::new(),
                     last_seen: None,
-                    enabled: expected.enabled,
                     terminal_enabled: false,
                     upgrade_enabled: false,
                     upgrade_status: None,
@@ -1392,16 +1377,16 @@ impl AppState {
                 .then_with(|| {
                     a.computer_name
                         .as_deref()
-                        .unwrap_or(&a.name)
+                        .unwrap_or(&a.id)
                         .to_ascii_lowercase()
                         .cmp(
                             &b.computer_name
                                 .as_deref()
-                                .unwrap_or(&b.name)
+                                .unwrap_or(&b.id)
                                 .to_ascii_lowercase(),
                         )
                 })
-                .then_with(|| a.name.cmp(&b.name))
+                .then_with(|| a.id.cmp(&b.id))
         });
 
         Ok(UiState {
@@ -1441,15 +1426,15 @@ impl AppState {
             .with_context(|| format!("terminal session {session_id} is not active"))?;
         let agent = runtime
             .agents
-            .get(&session.agent_name)
-            .with_context(|| format!("agent {} is offline", session.agent_name))?;
+            .get(&session.agent_id)
+            .with_context(|| format!("agent {} is offline", session.agent_id))?;
         agent.sender.send(message)?;
         Ok(())
     }
 
     fn send_terminal_ui(
         &self,
-        agent_name: &str,
+        agent_id: &str,
         session_id: &str,
         message: TerminalUiMessage,
     ) -> anyhow::Result<()> {
@@ -1461,10 +1446,10 @@ impl AppState {
             .terminal_sessions
             .get(session_id)
             .with_context(|| format!("terminal session {session_id} is not active"))?;
-        if session.agent_name != agent_name {
+        if session.agent_id != agent_id {
             bail!(
-                "terminal session {session_id} belongs to {}, not {agent_name}",
-                session.agent_name
+                "terminal session {session_id} belongs to {}, not {agent_id}",
+                session.agent_id
             );
         }
         let _ = session.sender.send(message);
@@ -1473,7 +1458,7 @@ impl AppState {
 
     fn finish_terminal_session(
         &self,
-        agent_name: &str,
+        agent_id: &str,
         session_id: &str,
         message: TerminalUiMessage,
     ) -> anyhow::Result<()> {
@@ -1485,10 +1470,10 @@ impl AppState {
             let Some(session) = runtime.terminal_sessions.remove(session_id) else {
                 return Ok(());
             };
-            if session.agent_name != agent_name {
+            if session.agent_id != agent_id {
                 bail!(
-                    "terminal session {session_id} belongs to {}, not {agent_name}",
-                    session.agent_name
+                    "terminal session {session_id} belongs to {}, not {agent_id}",
+                    session.agent_id
                 );
             }
             session
@@ -1504,7 +1489,7 @@ impl AppState {
     }
 
     fn close_terminal_session(&self, session_id: &str) {
-        let (agent_name, agent_sender) = {
+        let (agent_id, agent_sender) = {
             let mut runtime = match self.runtime.lock() {
                 Ok(runtime) => runtime,
                 Err(_) => return,
@@ -1514,16 +1499,16 @@ impl AppState {
             };
             let sender = runtime
                 .agents
-                .get(&session.agent_name)
+                .get(&session.agent_id)
                 .map(|agent| agent.sender.clone());
-            (session.agent_name, sender)
+            (session.agent_id, sender)
         };
         if let Some(sender) = agent_sender {
             let _ = sender.send(ServerToAgent::TerminalClose {
                 session_id: session_id.to_owned(),
             });
         } else {
-            warn!(agent = %agent_name, session = %session_id, "terminal agent already offline");
+            warn!(agent = %agent_id, session = %session_id, "terminal agent already offline");
         }
     }
 }
@@ -1539,6 +1524,17 @@ fn upgrade_blocks_dispatch(status: Option<&str>) -> bool {
     !(status.starts_with("failed")
         || status.starts_with("restart_requested")
         || status.starts_with("success"))
+}
+
+fn truncate_close_reason(value: &str) -> String {
+    let mut reason = String::new();
+    for ch in value.chars() {
+        if reason.len() + ch.len_utf8() > 120 {
+            break;
+        }
+        reason.push(ch);
+    }
+    reason
 }
 
 fn split_csv(value: &str) -> Vec<String> {

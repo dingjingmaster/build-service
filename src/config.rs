@@ -5,7 +5,6 @@ use std::{
 };
 
 use anyhow::{Context, bail};
-use serde::Serialize;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -59,8 +58,6 @@ pub struct ServerConfig {
 #[derive(Clone, Debug)]
 pub struct AgentConfig {
     pub server_url: String,
-    pub name: String,
-    pub token: String,
     pub advertise_ip: Option<String>,
     pub work_dir: PathBuf,
     pub concurrency: usize,
@@ -75,18 +72,11 @@ pub struct AgentConfig {
     pub upgrade_work_dir: PathBuf,
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct ServerAgentConfig {
-    pub name: String,
-    pub enabled: bool,
-}
-
 #[derive(Clone, Debug)]
 pub struct AppConfig {
     pub core: CoreConfig,
     pub server: Option<ServerConfig>,
     pub agent: Option<AgentConfig>,
-    pub server_agents: BTreeMap<String, ServerAgentConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,25 +123,10 @@ impl AppConfig {
             .map(|section| parse_agent_config(&core, section))
             .transpose()?;
 
-        let mut server_agents = BTreeMap::new();
-        for (section_name, section) in &ini.sections {
-            if let Some(agent_name) = section_name.strip_prefix("agent.") {
-                let enabled = parse_bool(optional(section, "enabled").unwrap_or("true"))?;
-                server_agents.insert(
-                    agent_name.to_owned(),
-                    ServerAgentConfig {
-                        name: agent_name.to_owned(),
-                        enabled,
-                    },
-                );
-            }
-        }
-
         Ok(Self {
             core,
             server,
             agent,
-            server_agents,
         })
     }
 }
@@ -234,8 +209,6 @@ fn parse_agent_config(
 
     Ok(AgentConfig {
         server_url: required(section, "server_url")?.to_owned(),
-        name: required(section, "name")?.to_owned(),
-        token: optional(section, "token").unwrap_or("").to_owned(),
         advertise_ip: optional(section, "advertise_ip").map(ToOwned::to_owned),
         work_dir: work_dir.clone(),
         concurrency: parse_usize(section, "concurrency", 1)?.max(1),
@@ -386,9 +359,6 @@ mod tests {
 
             [server]
             listen = 127.0.0.1:9090
-
-            [agent.builder-1]
-            enabled = yes
             "#,
         )
         .unwrap();
@@ -398,7 +368,6 @@ mod tests {
         let server = config.server.unwrap();
         assert_eq!(server.listen, "127.0.0.1:9090");
         assert!(!server.upgrade_enabled);
-        assert!(config.server_agents["builder-1"].enabled);
     }
 
     #[test]
@@ -411,14 +380,11 @@ mod tests {
 
             [agent]
             server_url = ws://127.0.0.1:8080/api/agent/ws
-            name = local
             "#,
         )
         .unwrap();
 
         let agent = config.agent.unwrap();
-        assert_eq!(agent.name, "local");
-        assert_eq!(agent.token, "");
         assert_eq!(agent.work_dir, PathBuf::from("/tmp/buildsvc-agent/work"));
         assert_eq!(agent.concurrency, 1);
         assert_eq!(agent.heartbeat_sec, 5);

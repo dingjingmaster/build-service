@@ -549,9 +549,9 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       return display(value);
     }
 
-    function agentComputerIp(agentName) {
-      const agent = state.agents.find(item => item.name === agentName);
-      if (!agent) return agentName;
+    function agentComputerIp(agentId) {
+      const agent = state.agents.find(item => item.id === agentId);
+      if (!agent) return agentId;
       const computer = display(agent.computer_name);
       const ip = display(agent.ip);
       return ip === "-" ? computer : `${computer} / ${ip}`;
@@ -564,7 +564,6 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
 
     function agentDetail(agent) {
       return compactJoin([
-        agent.name,
         agent.ip,
         formatOs(agent.platform),
         formatArch(agent.arch),
@@ -575,7 +574,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
     function render() {
       agentChecks.innerHTML = state.agents.map(agent => `
         <label class="agent-item">
-          <input type="checkbox" name="agent" value="${escapeHtml(agent.name)}" ${agent.enabled ? "" : "disabled"}>
+          <input type="checkbox" name="agent" value="${escapeHtml(agent.id)}">
           <span>
             <span>${escapeHtml(display(agent.computer_name))} ${status(agent.status)}</span>
             <span class="item-detail">${escapeHtml(agentDetail(agent))}</span>
@@ -585,11 +584,11 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       upgradeAgentChecks.innerHTML = state.agents.map(agent => {
         const enabled = agent.upgrade_enabled && agent.status !== "offline" && agent.running === 0;
         const detail = agent.upgrade_status
-          ? `${agent.name} · ${display(agent.version)} · ${agent.upgrade_status}`
-          : `${agent.name} · ${display(agent.version)}`;
+          ? `${display(agent.version)} · ${agent.upgrade_status}`
+          : `${display(agent.version)}`;
         return `
         <label class="agent-item">
-          <input type="checkbox" name="upgradeAgent" value="${escapeHtml(agent.name)}" ${enabled ? "" : "disabled"}>
+          <input type="checkbox" name="upgradeAgent" value="${escapeHtml(agent.id)}" ${enabled ? "" : "disabled"}>
           <span>
             <span>${escapeHtml(display(agent.computer_name))} ${status(agent.status)}</span>
             <span class="item-detail">${escapeHtml(detail)}</span>
@@ -607,7 +606,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
           <td title="${escapeHtml(display(agent.version))}">${escapeHtml(display(agent.version))}</td>
           <td>${agent.running}/${agent.capacity}</td>
           <td title="${escapeHtml(display(agent.upgrade_status))}">${status(agent.status)}</td>
-          <td><button class="secondary small" type="button" data-terminal="${escapeHtml(agent.name)}" ${agent.terminal_enabled && agent.status !== "offline" ? "" : "disabled"}>Open</button></td>
+          <td><button class="secondary small" type="button" data-terminal="${escapeHtml(agent.id)}" ${agent.terminal_enabled && agent.status !== "offline" ? "" : "disabled"}>Open</button></td>
         </tr>`).join("");
 
       for (const button of agentsBody.querySelectorAll("button[data-terminal]")) {
@@ -656,7 +655,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       runsBody.innerHTML = state.runs.map(run => `
         <tr class="selectable ${selectedRuns.has(run.id) ? "selected" : ""}" data-run="${escapeHtml(run.id)}">
           <td class="run-select"><input type="checkbox" name="runSelect" value="${escapeHtml(run.id)}" ${selectedRuns.has(run.id) ? "checked" : ""}></td>
-          <td title="${escapeHtml(run.agent_name)}">${escapeHtml(agentComputerIp(run.agent_name))}</td>
+          <td title="${escapeHtml(agentComputerIp(run.agent_id))}">${escapeHtml(agentComputerIp(run.agent_id))}</td>
           <td>${status(run.status)}</td>
         </tr>`).join("");
 
@@ -691,7 +690,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       const run = state.runs.find(item => item.id === selectedRun);
       const selectedCount = selectedRuns.size;
       selectedRunEl.textContent = run
-        ? `${run.id} on ${run.agent_name}${selectedCount > 1 ? ` · ${selectedCount} selected` : ""}`
+        ? `${run.id} on ${agentComputerIp(run.agent_id)}${selectedCount > 1 ? ` · ${selectedCount} selected` : ""}`
         : (selectedCount > 0 ? `${selectedCount} selected` : "");
       rerunBtn.disabled = !run || !["success", "failed", "lost", "canceled"].includes(run.status);
       cancelBtn.disabled = !run || !["queued", "assigned", "preparing", "running"].includes(run.status);
@@ -930,19 +929,19 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
       return null;
     }
 
-    function openTerminal(agentName) {
+    function openTerminal(agentId) {
       if (terminalSocket) {
         closeTerminal();
       }
-      terminalAgent = agentName;
+      terminalAgent = agentId;
       terminalBuffer = "";
       terminalOutput.textContent = "";
-      terminalTitle.textContent = `Terminal · ${agentName}`;
+      terminalTitle.textContent = `Terminal · ${agentComputerIp(agentId)}`;
       terminalStatus.textContent = "connecting";
       terminalPanel.classList.remove("hidden");
       terminalOutput.focus();
 
-      terminalSocket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/agents/${encodeURIComponent(agentName)}/terminal/ws`);
+      terminalSocket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/agents/${encodeURIComponent(agentId)}/terminal/ws`);
       terminalSocket.onopen = () => {
         terminalStatus.textContent = "connected";
         sendTerminalResize();

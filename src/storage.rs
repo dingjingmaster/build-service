@@ -32,7 +32,7 @@ pub struct BuildRow {
 pub struct RunRow {
     pub id: String,
     pub build_id: String,
-    pub agent_name: String,
+    pub agent_id: String,
     pub labels: Vec<String>,
     pub status: String,
     pub source_path: PathBuf,
@@ -43,7 +43,7 @@ pub struct RunRow {
 #[derive(Debug, Clone)]
 pub struct NewRun {
     pub id: String,
-    pub agent_name: String,
+    pub agent_id: String,
     pub labels: Vec<String>,
     pub script_timeout_sec: u64,
 }
@@ -119,14 +119,14 @@ impl Storage {
         for run in runs {
             tx.execute(
                 "INSERT INTO runs(
-                    id, build_id, agent_name, labels_json, status, exit_code, created_at,
+                    id, build_id, agent_id, labels_json, status, exit_code, created_at,
                     started_at, finished_at, source_path, archive_format, script_timeout_sec, rerun_of
                  )
                  VALUES (?1, ?2, ?3, ?4, 'queued', NULL, ?5, NULL, NULL, ?6, ?7, ?8, NULL)",
                 params![
                     run.id,
                     id,
-                    run.agent_name,
+                    run.agent_id,
                     labels_json(&run.labels),
                     created_at,
                     source_path.to_string_lossy(),
@@ -147,14 +147,14 @@ impl Storage {
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO runs(
-                id, build_id, agent_name, labels_json, status, exit_code, created_at,
+                id, build_id, agent_id, labels_json, status, exit_code, created_at,
                 started_at, finished_at, source_path, archive_format, script_timeout_sec, rerun_of
              )
              VALUES (?1, ?2, ?3, ?4, 'queued', NULL, ?5, NULL, NULL, ?6, ?7, ?8, ?9)",
             params![
                 new_run_id,
                 source.build_id,
-                source.agent_name,
+                source.agent_id,
                 labels_json,
                 created_at,
                 source.source_path.to_string_lossy(),
@@ -197,7 +197,7 @@ impl Storage {
     pub fn list_runs(&self) -> anyhow::Result<Vec<RunView>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, build_id, agent_name, status, exit_code, created_at,
+            "SELECT id, build_id, agent_id, status, exit_code, created_at,
                     started_at, finished_at
              FROM runs ORDER BY created_at DESC",
         )?;
@@ -205,7 +205,7 @@ impl Storage {
             Ok(RunView {
                 id: row.get(0)?,
                 build_id: row.get(1)?,
-                agent_name: row.get(2)?,
+                agent_id: row.get(2)?,
                 status: row.get(3)?,
                 exit_code: row.get(4)?,
                 created_at: row.get(5)?,
@@ -223,7 +223,7 @@ impl Storage {
     pub fn get_run(&self, run_id: &str) -> anyhow::Result<Option<RunRow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, build_id, agent_name, labels_json, status, exit_code, created_at,
+            "SELECT id, build_id, agent_id, labels_json, status, exit_code, created_at,
                     started_at, finished_at, source_path, archive_format, script_timeout_sec
              FROM runs WHERE id = ?1",
         )?;
@@ -298,13 +298,13 @@ impl Storage {
         Ok(ids)
     }
 
-    pub fn mark_agent_runs_lost(&self, agent_name: &str) -> anyhow::Result<Vec<String>> {
+    pub fn mark_agent_runs_lost(&self, agent_id: &str) -> anyhow::Result<Vec<String>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id FROM runs
-             WHERE agent_name = ?1 AND status IN ('assigned', 'preparing', 'running')",
+             WHERE agent_id = ?1 AND status IN ('assigned', 'preparing', 'running')",
         )?;
-        let rows = stmt.query_map(params![agent_name], |row| row.get::<_, String>(0))?;
+        let rows = stmt.query_map(params![agent_id], |row| row.get::<_, String>(0))?;
         let ids = collect_rows(rows)?;
         drop(stmt);
         for id in &ids {
@@ -409,7 +409,7 @@ impl Storage {
     fn runs_by_status(&self, status: &str) -> anyhow::Result<Vec<RunRow>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, build_id, agent_name, labels_json, status, exit_code, created_at,
+            "SELECT id, build_id, agent_id, labels_json, status, exit_code, created_at,
                     started_at, finished_at, source_path, archive_format, script_timeout_sec
              FROM runs WHERE status = ?1 ORDER BY created_at ASC",
         )?;
@@ -453,7 +453,7 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
         CREATE TABLE IF NOT EXISTS runs (
             id TEXT PRIMARY KEY,
             build_id TEXT NOT NULL REFERENCES builds(id),
-            agent_name TEXT NOT NULL,
+            agent_id TEXT NOT NULL,
             labels_json TEXT NOT NULL,
             status TEXT NOT NULL,
             exit_code INTEGER,
@@ -466,10 +466,38 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             rerun_of TEXT
         );
 
-        CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status);
-        CREATE INDEX IF NOT EXISTS idx_runs_agent_status ON runs(agent_name, status);
-        CREATE INDEX IF NOT EXISTS idx_runs_build_id ON runs(build_id);
         "#,
+    )?;
+    ensure_agent_id_column(conn)?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_status ON runs(status)",
+        [],
+    )?;
+    Ok(())
+}
+
+fn ensure_agent_id_column(conn: &Connection) -> anyhow::Result<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(runs)")?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let has_agent_id = columns.iter().any(|column| column == "agent_id");
+    let has_agent_name = columns.iter().any(|column| column == "agent_name");
+
+    if !has_agent_id && has_agent_name {
+        conn.execute("ALTER TABLE runs ADD COLUMN agent_id TEXT", [])?;
+        conn.execute(
+            "UPDATE runs SET agent_id = agent_name WHERE agent_id IS NULL OR agent_id = ''",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_agent_status ON runs(agent_id, status)",
+        [],
+    )?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_runs_build_id ON runs(build_id)",
+        [],
     )?;
     Ok(())
 }
@@ -480,7 +508,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
     Ok(RunRow {
         id: row.get(0)?,
         build_id: row.get(1)?,
-        agent_name: row.get(2)?,
+        agent_id: row.get(2)?,
         labels: parse_labels(&labels_json),
         status: row.get(4)?,
         source_path: PathBuf::from(row.get::<_, String>(9)?),
@@ -568,7 +596,7 @@ mod tests {
                 &source,
                 &[NewRun {
                     id: "run_1".to_owned(),
-                    agent_name: "agent_1".to_owned(),
+                    agent_id: "agent_1".to_owned(),
                     labels: vec!["linux".to_owned(), "amd64".to_owned()],
                     script_timeout_sec: 60,
                 }],
@@ -608,5 +636,54 @@ mod tests {
         assert!(build_source_dir(sources_dir, "build/123").is_err());
         assert!(build_source_dir(sources_dir, r"build\123").is_err());
         assert!(build_source_dir(sources_dir, "").is_err());
+    }
+
+    #[test]
+    fn migrates_old_agent_name_column_to_agent_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("buildsvc.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE builds (
+                    id TEXT PRIMARY KEY,
+                    source_name TEXT NOT NULL,
+                    archive_format TEXT NOT NULL,
+                    source_path TEXT NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    status TEXT NOT NULL
+                );
+
+                CREATE TABLE runs (
+                    id TEXT PRIMARY KEY,
+                    build_id TEXT NOT NULL REFERENCES builds(id),
+                    agent_name TEXT NOT NULL,
+                    labels_json TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    exit_code INTEGER,
+                    created_at INTEGER NOT NULL,
+                    started_at INTEGER,
+                    finished_at INTEGER,
+                    source_path TEXT NOT NULL,
+                    archive_format TEXT NOT NULL,
+                    script_timeout_sec INTEGER NOT NULL,
+                    rerun_of TEXT
+                );
+
+                INSERT INTO builds(id, source_name, archive_format, source_path, created_at, status)
+                VALUES ('build_old', 'source.tar.gz', 'tar.gz', '/tmp/source.tar.gz', 1, 'queued');
+                INSERT INTO runs(id, build_id, agent_name, labels_json, status, exit_code, created_at,
+                                 started_at, finished_at, source_path, archive_format, script_timeout_sec, rerun_of)
+                VALUES ('run_old', 'build_old', 'old-agent', '[]', 'queued', NULL, 1,
+                        NULL, NULL, '/tmp/source.tar.gz', 'tar.gz', 60, NULL);
+                "#,
+            )
+            .unwrap();
+        }
+
+        let storage = Storage::open(dir.path().to_path_buf(), db_path).unwrap();
+        let run = storage.get_run("run_old").unwrap().unwrap();
+        assert_eq!(run.agent_id, "old-agent");
     }
 }
