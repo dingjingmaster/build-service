@@ -123,13 +123,26 @@ sudo dnf remove buildsvc
 
 ```bash
 make emerge
-sudo env PORTDIR_OVERLAY="$PWD/target/package/gentoo-overlay" emerge -av app-admin/buildsvc
 ```
 
 `make emerge` 会生成：
 
 - `target/package/gentoo-overlay/`
 - `target/package/buildsvc-<version>-gentoo-overlay.tar.gz`
+
+临时使用本地 overlay 安装：
+
+```bash
+sudo env PORTDIR_OVERLAY="$PWD/target/package/gentoo-overlay" emerge -av app-admin/buildsvc
+```
+
+也可以把 overlay 解包到固定目录后再安装：
+
+```bash
+sudo mkdir -p /var/local/overlays/buildsvc
+sudo tar -xf target/package/buildsvc-*-gentoo-overlay.tar.gz -C /var/local/overlays/buildsvc --strip-components=1
+sudo env PORTDIR_OVERLAY="/var/local/overlays/buildsvc" emerge -av app-admin/buildsvc
+```
 
 默认 ebuild 会按当前架构生成稳定 keyword，例如 `amd64` 或 `arm64`。如果你希望生成 unstable keyword，可以这样覆盖：
 
@@ -142,14 +155,26 @@ GENTOO_KEYWORDS='~amd64' make emerge
 ```bash
 sudo mkdir -p /etc/portage/package.accept_keywords
 echo 'app-admin/buildsvc ~amd64' | sudo tee /etc/portage/package.accept_keywords/buildsvc
+sudo env PORTDIR_OVERLAY="$PWD/target/package/gentoo-overlay" emerge -av app-admin/buildsvc
 ```
 
-安装后修改配置并重启：
+安装后修改配置。默认安装配置的角色是 `agent`，通常只需要改 `server_url` 和 `name`：
 
 ```bash
 sudoedit /etc/buildsvc/buildsvc.ini
+```
+
+如果机器使用 systemd，安装脚本会自动 `daemon-reload`、`enable`、`restart`。也可以手动检查：
+
+```bash
 sudo systemctl restart buildsvc
 sudo systemctl status buildsvc
+```
+
+如果机器使用 OpenRC，当前包暂未安装 OpenRC init script，可以先直接运行：
+
+```bash
+sudo /usr/bin/buildsvc
 ```
 
 卸载：

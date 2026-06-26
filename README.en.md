@@ -117,7 +117,6 @@ sudo dnf remove buildsvc
 
 ```bash
 make emerge
-sudo env PORTDIR_OVERLAY="$PWD/target/package/gentoo-overlay" emerge -av app-admin/buildsvc
 ```
 
 `make emerge` generates:
@@ -125,18 +124,51 @@ sudo env PORTDIR_OVERLAY="$PWD/target/package/gentoo-overlay" emerge -av app-adm
 - `target/package/gentoo-overlay/`
 - `target/package/buildsvc-<version>-gentoo-overlay.tar.gz`
 
+Install using the local overlay temporarily:
+
+```bash
+sudo env PORTDIR_OVERLAY="$PWD/target/package/gentoo-overlay" emerge -av app-admin/buildsvc
+```
+
+Or unpack the overlay into a fixed path and install from there:
+
+```bash
+sudo mkdir -p /var/local/overlays/buildsvc
+sudo tar -xf target/package/buildsvc-*-gentoo-overlay.tar.gz -C /var/local/overlays/buildsvc --strip-components=1
+sudo env PORTDIR_OVERLAY="/var/local/overlays/buildsvc" emerge -av app-admin/buildsvc
+```
+
 Gentoo ebuilds default to a stable keyword for the host architecture, such as `amd64` or `arm64`. To generate an unstable keyword intentionally:
 
 ```bash
 GENTOO_KEYWORDS='~amd64' make emerge
 ```
 
-Edit config and restart after installation:
+If emerge reports a keyword mask such as `masked by: ~amd64 keyword`, either regenerate with the default stable keyword or allow it explicitly:
+
+```bash
+sudo mkdir -p /etc/portage/package.accept_keywords
+echo 'app-admin/buildsvc ~amd64' | sudo tee /etc/portage/package.accept_keywords/buildsvc
+sudo env PORTDIR_OVERLAY="$PWD/target/package/gentoo-overlay" emerge -av app-admin/buildsvc
+```
+
+Edit config after installation. The default packaged role is `agent`, so a normal agent host usually only needs `server_url` and `name`:
 
 ```bash
 sudoedit /etc/buildsvc/buildsvc.ini
+```
+
+On systemd hosts, package scripts automatically run `daemon-reload`, `enable`, and `restart`. You can also check manually:
+
+```bash
 sudo systemctl restart buildsvc
 sudo systemctl status buildsvc
+```
+
+On OpenRC hosts, this package does not yet install an OpenRC init script. Run it directly for now:
+
+```bash
+sudo /usr/bin/buildsvc
 ```
 
 Uninstall:
