@@ -75,7 +75,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .tab-panel.active { display: block; }
     .main-grid {
       display: grid;
-      grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+      grid-template-columns: minmax(320px, 440px) minmax(0, 1fr);
       gap: 18px;
       align-items: stretch;
     }
@@ -106,6 +106,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
     .body { padding: 14px; }
     .stack { display: grid; gap: 12px; align-content: start; }
+    .field-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 5px;
+    }
+    .field-head label { margin-bottom: 0; }
     .workspace {
       display: grid;
       gap: 12px;
@@ -217,7 +225,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
       display: grid;
       gap: 8px;
       max-height: 240px;
-      overflow: auto;
+      overflow-y: auto;
+      overflow-x: hidden;
       border: 1px solid var(--line);
       border-radius: 5px;
       padding: 8px;
@@ -228,6 +237,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       align-items: center;
       gap: 8px;
     }
+    .agent-item > span { min-width: 0; }
     .item-detail { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     #log {
       flex: 1;
@@ -349,7 +359,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
                 <input id="source" name="source" type="file" accept=".zip,.tgz,.tar.gz" required>
               </div>
               <div>
-                <label>Agents</label>
+                <div class="field-head">
+                  <label>Agents</label>
+                  <button id="selectAllSubmitAgents" class="secondary small" type="button">Select All</button>
+                </div>
                 <div id="agentChecks" class="agent-list"></div>
               </div>
               <button type="submit">Start</button>
@@ -454,7 +467,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
               <input id="upgradePackage" name="package" type="file" accept=".deb,.rpm,.tgz,.tar.gz" required>
             </div>
             <div>
-              <label>Agents</label>
+              <div class="field-head">
+                <label>Agents</label>
+                <button id="selectAllUpgradeAgents" class="secondary small" type="button">Select All</button>
+              </div>
               <div id="upgradeAgentChecks" class="agent-list"></div>
             </div>
             <button type="submit">Push Upgrade</button>
@@ -485,6 +501,8 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let selectedRun = null;
     let selectedRuns = new Set();
     let selectedBuilds = new Set();
+    let selectedSubmitAgents = new Set();
+    let selectedUpgradeAgents = new Set();
     let terminalSocket = null;
     let terminalBuffer = "";
     let terminalAgent = null;
@@ -497,8 +515,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const upgradePanel = document.getElementById("upgradePanel");
     const uploadForm = document.getElementById("uploadForm");
     const submitResult = document.getElementById("submitResult");
+    const selectAllSubmitAgents = document.getElementById("selectAllSubmitAgents");
     const agentChecks = document.getElementById("agentChecks");
     const upgradeForm = document.getElementById("upgradeForm");
+    const selectAllUpgradeAgents = document.getElementById("selectAllUpgradeAgents");
     const upgradeAgentChecks = document.getElementById("upgradeAgentChecks");
     const upgradeResult = document.getElementById("upgradeResult");
     const upgradeLog = document.getElementById("upgradeLog");
@@ -596,35 +616,73 @@ const INDEX_HTML: &str = r#"<!doctype html>
       return ["queued", "assigned", "preparing", "running"].includes(value);
     }
 
+    function isUpgradeAgentEnabled(agent) {
+      return agent.upgrade_enabled && agent.status !== "offline" && agent.running === 0;
+    }
+
     function render() {
       const onlineAgents = state.agents.filter(agent => agent.status !== "offline").length;
       const activeRuns = state.runs.filter(run => isActiveRunStatus(run.status)).length;
+      const submitAgentIds = new Set(state.agents.map(agent => agent.id));
+      const upgradeAgentIds = new Set(state.agents.filter(isUpgradeAgentEnabled).map(agent => agent.id));
+      selectedSubmitAgents = new Set([...selectedSubmitAgents].filter(agentId => submitAgentIds.has(agentId)));
+      selectedUpgradeAgents = new Set([...selectedUpgradeAgents].filter(agentId => upgradeAgentIds.has(agentId)));
       agentsCount.textContent = `(${onlineAgents}/${state.agents.length})`;
       runsCount.textContent = `(${activeRuns}/${state.runs.length})`;
+      selectAllSubmitAgents.disabled = state.agents.length === 0;
+      selectAllSubmitAgents.textContent = state.agents.length > 0 && state.agents.every(agent => selectedSubmitAgents.has(agent.id))
+        ? "Clear All"
+        : "Select All";
+      selectAllUpgradeAgents.disabled = upgradeAgentIds.size === 0;
+      selectAllUpgradeAgents.textContent = upgradeAgentIds.size > 0 && [...upgradeAgentIds].every(agentId => selectedUpgradeAgents.has(agentId))
+        ? "Clear All"
+        : "Select All";
 
       agentChecks.innerHTML = state.agents.map(agent => `
         <label class="agent-item">
-          <input type="checkbox" name="agent" value="${escapeHtml(agent.id)}">
+          <input type="checkbox" name="agent" value="${escapeHtml(agent.id)}" ${selectedSubmitAgents.has(agent.id) ? "checked" : ""}>
           <span>
             <span>${escapeHtml(display(agent.computer_name))} ${status(agent.status)}</span>
             <span class="item-detail">${escapeHtml(agentDetail(agent))}</span>
           </span>
         </label>`).join("");
 
+      for (const checkbox of agentChecks.querySelectorAll("input[name='agent']")) {
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) {
+            selectedSubmitAgents.add(checkbox.value);
+          } else {
+            selectedSubmitAgents.delete(checkbox.value);
+          }
+          render();
+        });
+      }
+
       upgradeAgentChecks.innerHTML = state.agents.map(agent => {
-        const enabled = agent.upgrade_enabled && agent.status !== "offline" && agent.running === 0;
+        const enabled = isUpgradeAgentEnabled(agent);
         const detail = agent.upgrade_status
           ? `${display(agent.version)} · ${agent.upgrade_status}`
           : `${display(agent.version)}`;
         return `
         <label class="agent-item">
-          <input type="checkbox" name="upgradeAgent" value="${escapeHtml(agent.id)}" ${enabled ? "" : "disabled"}>
+          <input type="checkbox" name="upgradeAgent" value="${escapeHtml(agent.id)}" ${selectedUpgradeAgents.has(agent.id) ? "checked" : ""} ${enabled ? "" : "disabled"}>
           <span>
             <span>${escapeHtml(display(agent.computer_name))} ${status(agent.status)}</span>
             <span class="item-detail">${escapeHtml(detail)}</span>
           </span>
         </label>`;
       }).join("");
+
+      for (const checkbox of upgradeAgentChecks.querySelectorAll("input[name='upgradeAgent']")) {
+        checkbox.addEventListener("change", () => {
+          if (checkbox.checked) {
+            selectedUpgradeAgents.add(checkbox.value);
+          } else {
+            selectedUpgradeAgents.delete(checkbox.value);
+          }
+          render();
+        });
+      }
 
       agentsBody.innerHTML = state.agents.map(agent => `
         <tr>
@@ -747,8 +805,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const form = new FormData();
       const file = document.getElementById("source").files[0];
       if (!file) return;
-      const selected = Array.from(document.querySelectorAll("input[name='agent']:checked"))
-        .map(input => input.value);
+      const selected = [...selectedSubmitAgents];
       form.append("source", file);
       form.append("target_agents", selected.join(","));
       submitResult.textContent = "uploading";
@@ -759,7 +816,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
       }
       state = await response.json();
       submitResult.textContent = "submitted";
+      selectedSubmitAgents.clear();
       uploadForm.reset();
+      render();
+    });
+
+    selectAllSubmitAgents.addEventListener("click", () => {
+      const agentIds = state.agents.map(agent => agent.id);
+      const allSelected = agentIds.length > 0 && agentIds.every(agentId => selectedSubmitAgents.has(agentId));
+      selectedSubmitAgents = allSelected ? new Set() : new Set(agentIds);
       render();
     });
 
@@ -776,8 +841,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const form = new FormData();
       const file = document.getElementById("upgradePackage").files[0];
       if (!file) return;
-      const selected = Array.from(document.querySelectorAll("input[name='upgradeAgent']:checked"))
-        .map(input => input.value);
+      const selected = [...selectedUpgradeAgents];
       if (selected.length === 0) {
         upgradeResult.textContent = "select at least one upgrade-enabled online agent";
         return;
@@ -796,7 +860,15 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const failed = result.failed.length > 0 ? ` · failed: ${result.failed.join("; ")}` : "";
       upgradeResult.textContent = `${result.upgrade_id} sent to ${result.sent.join(", ")}${failed}`;
       appendUpgradeLog(`[server] ${upgradeResult.textContent}\n`);
+      selectedUpgradeAgents.clear();
       upgradeForm.reset();
+      render();
+    });
+
+    selectAllUpgradeAgents.addEventListener("click", () => {
+      const agentIds = state.agents.filter(isUpgradeAgentEnabled).map(agent => agent.id);
+      const allSelected = agentIds.length > 0 && agentIds.every(agentId => selectedUpgradeAgents.has(agentId));
+      selectedUpgradeAgents = allSelected ? new Set() : new Set(agentIds);
       render();
     });
 
