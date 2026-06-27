@@ -21,6 +21,7 @@ struct StorageInner {
     sources_dir: PathBuf,
     logs_dir: PathBuf,
     upgrades_dir: PathBuf,
+    runs_has_agent_name: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -69,6 +70,7 @@ impl Storage {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         init_schema(&conn)?;
+        let runs_has_agent_name = table_has_column(&conn, "runs", "agent_name")?;
 
         Ok(Self {
             inner: Arc::new(StorageInner {
@@ -76,6 +78,7 @@ impl Storage {
                 sources_dir,
                 logs_dir,
                 upgrades_dir,
+                runs_has_agent_name,
             }),
         })
     }
@@ -117,23 +120,43 @@ impl Storage {
         )?;
 
         for run in runs {
-            tx.execute(
-                "INSERT INTO runs(
-                    id, build_id, agent_id, labels_json, status, exit_code, created_at,
-                    started_at, finished_at, source_path, archive_format, script_timeout_sec, rerun_of
-                 )
-                 VALUES (?1, ?2, ?3, ?4, 'queued', NULL, ?5, NULL, NULL, ?6, ?7, ?8, NULL)",
-                params![
-                    run.id,
-                    id,
-                    run.agent_id,
-                    labels_json(&run.labels),
-                    created_at,
-                    source_path.to_string_lossy(),
-                    archive_format.to_string(),
-                    run.script_timeout_sec as i64,
-                ],
-            )?;
+            if self.inner.runs_has_agent_name {
+                tx.execute(
+                    "INSERT INTO runs(
+                        id, build_id, agent_id, agent_name, labels_json, status, exit_code, created_at,
+                        started_at, finished_at, source_path, archive_format, script_timeout_sec, rerun_of
+                     )
+                     VALUES (?1, ?2, ?3, ?3, ?4, 'queued', NULL, ?5, NULL, NULL, ?6, ?7, ?8, NULL)",
+                    params![
+                        run.id,
+                        id,
+                        run.agent_id,
+                        labels_json(&run.labels),
+                        created_at,
+                        source_path.to_string_lossy(),
+                        archive_format.to_string(),
+                        run.script_timeout_sec as i64,
+                    ],
+                )?;
+            } else {
+                tx.execute(
+                    "INSERT INTO runs(
+                        id, build_id, agent_id, labels_json, status, exit_code, created_at,
+                        started_at, finished_at, source_path, archive_format, script_timeout_sec, rerun_of
+                     )
+                     VALUES (?1, ?2, ?3, ?4, 'queued', NULL, ?5, NULL, NULL, ?6, ?7, ?8, NULL)",
+                    params![
+                        run.id,
+                        id,
+                        run.agent_id,
+                        labels_json(&run.labels),
+                        created_at,
+                        source_path.to_string_lossy(),
+                        archive_format.to_string(),
+                        run.script_timeout_sec as i64,
+                    ],
+                )?;
+            }
         }
         tx.commit()?;
         drop(conn);
@@ -145,24 +168,45 @@ impl Storage {
         let created_at = now_ts();
         let labels_json = serde_json::to_string(&source.labels)?;
         let conn = self.conn()?;
-        conn.execute(
-            "INSERT INTO runs(
-                id, build_id, agent_id, labels_json, status, exit_code, created_at,
-                started_at, finished_at, source_path, archive_format, script_timeout_sec, rerun_of
-             )
-             VALUES (?1, ?2, ?3, ?4, 'queued', NULL, ?5, NULL, NULL, ?6, ?7, ?8, ?9)",
-            params![
-                new_run_id,
-                source.build_id,
-                source.agent_id,
-                labels_json,
-                created_at,
-                source.source_path.to_string_lossy(),
-                source.archive_format.to_string(),
-                source.script_timeout_sec as i64,
-                source.id,
-            ],
-        )?;
+        if self.inner.runs_has_agent_name {
+            conn.execute(
+                "INSERT INTO runs(
+                    id, build_id, agent_id, agent_name, labels_json, status, exit_code, created_at,
+                    started_at, finished_at, source_path, archive_format, script_timeout_sec, rerun_of
+                 )
+                 VALUES (?1, ?2, ?3, ?3, ?4, 'queued', NULL, ?5, NULL, NULL, ?6, ?7, ?8, ?9)",
+                params![
+                    new_run_id,
+                    source.build_id,
+                    source.agent_id,
+                    labels_json,
+                    created_at,
+                    source.source_path.to_string_lossy(),
+                    source.archive_format.to_string(),
+                    source.script_timeout_sec as i64,
+                    source.id,
+                ],
+            )?;
+        } else {
+            conn.execute(
+                "INSERT INTO runs(
+                    id, build_id, agent_id, labels_json, status, exit_code, created_at,
+                    started_at, finished_at, source_path, archive_format, script_timeout_sec, rerun_of
+                 )
+                 VALUES (?1, ?2, ?3, ?4, 'queued', NULL, ?5, NULL, NULL, ?6, ?7, ?8, ?9)",
+                params![
+                    new_run_id,
+                    source.build_id,
+                    source.agent_id,
+                    labels_json,
+                    created_at,
+                    source.source_path.to_string_lossy(),
+                    source.archive_format.to_string(),
+                    source.script_timeout_sec as i64,
+                    source.id,
+                ],
+            )?;
+        }
         drop(conn);
         self.refresh_build_status(&source.build_id)?;
         Ok(())
@@ -477,12 +521,8 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
 }
 
 fn ensure_agent_id_column(conn: &Connection) -> anyhow::Result<()> {
-    let mut stmt = conn.prepare("PRAGMA table_info(runs)")?;
-    let columns = stmt
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    let has_agent_id = columns.iter().any(|column| column == "agent_id");
-    let has_agent_name = columns.iter().any(|column| column == "agent_name");
+    let has_agent_id = table_has_column(conn, "runs", "agent_id")?;
+    let has_agent_name = table_has_column(conn, "runs", "agent_name")?;
 
     if !has_agent_id && has_agent_name {
         conn.execute("ALTER TABLE runs ADD COLUMN agent_id TEXT", [])?;
@@ -500,6 +540,14 @@ fn ensure_agent_id_column(conn: &Connection) -> anyhow::Result<()> {
         [],
     )?;
     Ok(())
+}
+
+fn table_has_column(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(columns.iter().any(|value| value == column))
 }
 
 fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
@@ -685,5 +733,32 @@ mod tests {
         let storage = Storage::open(dir.path().to_path_buf(), db_path).unwrap();
         let run = storage.get_run("run_old").unwrap().unwrap();
         assert_eq!(run.agent_id, "old-agent");
+
+        let source_dir = storage.sources_dir().join("build_new");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("source.tar.gz");
+        fs::write(&source, b"fake").unwrap();
+        storage
+            .create_build(
+                "build_new",
+                "source.tar.gz",
+                ArchiveFormat::TarGz,
+                &source,
+                &[NewRun {
+                    id: "run_new".to_owned(),
+                    agent_id: "agent_new".to_owned(),
+                    labels: Vec::new(),
+                    script_timeout_sec: 60,
+                }],
+            )
+            .unwrap();
+
+        let new_run = storage.get_run("run_new").unwrap().unwrap();
+        assert_eq!(new_run.agent_id, "agent_new");
+        storage.create_rerun(&new_run, "run_new_2").unwrap();
+        assert_eq!(
+            storage.get_run("run_new_2").unwrap().unwrap().agent_id,
+            "agent_new"
+        );
     }
 }

@@ -442,6 +442,60 @@ mod tests {
         assert!(work_dir.join("runs").join("manual").exists());
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prepare_script_marks_nested_scripts_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path();
+        let scripts_dir = source_root.join("scripts");
+        let bin_dir = source_root.join("bin");
+        std::fs::create_dir_all(&scripts_dir).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let run_build = source_root.join("run-build.sh");
+        let nested_script = scripts_dir.join("build-all.sh");
+        let shebang_tool = bin_dir.join("sync-output");
+        let readme = source_root.join("README.txt");
+        std::fs::write(&run_build, b"#!/bin/sh\n").unwrap();
+        std::fs::write(&nested_script, b"#!/bin/sh\n").unwrap();
+        std::fs::write(&shebang_tool, b"#!/usr/bin/env bash\n").unwrap();
+        std::fs::write(&readme, b"not a script\n").unwrap();
+        for path in [&run_build, &nested_script, &shebang_tool, &readme] {
+            let mut permissions = std::fs::metadata(path).unwrap().permissions();
+            permissions.set_mode(0o644);
+            std::fs::set_permissions(path, permissions).unwrap();
+        }
+
+        prepare_script(source_root).await.unwrap();
+
+        assert_eq!(
+            std::fs::metadata(&run_build).unwrap().permissions().mode() & 0o111,
+            0o111
+        );
+        assert_eq!(
+            std::fs::metadata(&nested_script)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0o111
+        );
+        assert_eq!(
+            std::fs::metadata(&shebang_tool)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0o111
+        );
+        assert_eq!(
+            std::fs::metadata(&readme).unwrap().permissions().mode() & 0o111,
+            0
+        );
+    }
+
     #[test]
     fn validates_upgrade_package_filename() {
         assert!(validate_upgrade_package_filename(UpgradePackageKind::Deb, "buildsvc.deb").is_ok());
@@ -797,14 +851,14 @@ async fn run_script(
 async fn prepare_script(source_root: &Path) -> anyhow::Result<()> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         let script = source_root.join("run-build.sh");
         let metadata = fs::metadata(&script)
             .await
             .with_context(|| format!("missing {}", script.display()))?;
-        let mut permissions = metadata.permissions();
-        permissions.set_mode(permissions.mode() | 0o755);
-        fs::set_permissions(&script, permissions).await?;
+        if !metadata.is_file() {
+            bail!("{} is not a file", script.display());
+        }
+        make_unix_scripts_executable(source_root).await?;
     }
 
     #[cfg(windows)]
@@ -815,6 +869,68 @@ async fn prepare_script(source_root: &Path) -> anyhow::Result<()> {
         }
     }
 
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn make_unix_scripts_executable(source_root: &Path) -> anyhow::Result<()> {
+    let source_root = source_root.to_path_buf();
+    tokio::task::spawn_blocking(move || make_unix_scripts_executable_sync(&source_root))
+        .await
+        .context("join script permission task")?
+}
+
+#[cfg(unix)]
+fn make_unix_scripts_executable_sync(source_root: &Path) -> anyhow::Result<()> {
+    let mut dirs = vec![source_root.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let entries = std::fs::read_dir(&dir).with_context(|| format!("read {}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.with_context(|| format!("read entry in {}", dir.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("stat {}", path.display()))?;
+            if file_type.is_dir() {
+                dirs.push(path);
+            } else if file_type.is_file() && is_unix_script_file(&path)? {
+                add_execute_bits(&path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn is_unix_script_file(path: &Path) -> anyhow::Result<bool> {
+    if path.file_name().and_then(|name| name.to_str()) == Some("run-build.sh")
+        || path.extension().and_then(|extension| extension.to_str()) == Some("sh")
+    {
+        return Ok(true);
+    }
+
+    let mut file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let mut magic = [0_u8; 2];
+    match file.read(&mut magic) {
+        Ok(2) => Ok(&magic == b"#!"),
+        Ok(_) => Ok(false),
+        Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+#[cfg(unix)]
+fn add_execute_bits(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = std::fs::metadata(path).with_context(|| format!("stat {}", path.display()))?;
+    let mut permissions = metadata.permissions();
+    let mode = permissions.mode();
+    let new_mode = mode | 0o111;
+    if new_mode != mode {
+        permissions.set_mode(new_mode);
+        std::fs::set_permissions(path, permissions)
+            .with_context(|| format!("set permissions {}", path.display()))?;
+    }
     Ok(())
 }
 

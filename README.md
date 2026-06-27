@@ -409,9 +409,17 @@ Web UI 的 Upgrades tab 支持上传：
 
 ### 源码包规范
 
-源码包必须只有一个顶层目录。脚本必须放在这个顶层目录里。
+源码包支持两种结构：脚本可以直接放在压缩包根目录，也可以放在唯一顶层目录里。agent 会优先在解压目录本身找脚本；找不到时，如果只有一个顶层目录，则进入该目录找脚本。
 
-Linux/macOS 示例：
+根目录脚本示例：
+
+```text
+run-build.sh
+src/
+Makefile
+```
+
+单顶层目录示例：
 
 ```text
 my-project/
@@ -420,19 +428,19 @@ my-project/
   Makefile
 ```
 
-Windows 示例：
+Windows 对应脚本为：
 
 ```text
-my-project/
-  run-build.bat
-  src/
+run-build.bat
+src/
 ```
 
 agent 解包后会进入源码根目录执行脚本：
 
-- Linux/macOS：执行前会先给 `run-build.sh` 加执行权限。
+- Linux/macOS：执行前会先给 `run-build.sh`、`*.sh` 和带 shebang 的脚本文件加执行权限。
 - Windows：执行 `run-build.bat`。
 - 脚本退出码为 `0` 时 run 标记为成功，非 `0` 时标记为失败。
+- 脚本 stdin 默认关闭；`ssh`、`scp` 等命令应使用密钥和 known_hosts 做非交互配置，避免等待密码或首次连接确认。
 - 脚本成功后 agent 自动删除本次 `<work_dir>/runs/run_*` 工作区；脚本失败、超时或取消时保留现场。
 - agent 启动时会自动清理 `<work_dir>/runs` 下历史 `run_*` 工作区。
 - 脚本 stdout/stderr 会实时回传到 server，并在 Web UI 的 Run Log 中显示。
@@ -522,7 +530,7 @@ upgrade_enabled = false
 
 1. 启动 server。
 2. 启动一个或多个 agent，确认 Web UI 中 Agents 状态为 online。
-3. 准备包含顶层目录和固定构建脚本的 `.tar.gz` 或 `.zip`。
+3. 准备包含固定构建脚本的 `.tar.gz` 或 `.zip`。
 4. 在 Web UI 的 Builds tab 上传源码包，并选择目标 agents。
 5. 在 Runs 中查看执行状态，在 Run Log 中查看实时日志。
 6. 如需清理，先删除对应 runs；build 没有关联 runs 后可删除源码包。

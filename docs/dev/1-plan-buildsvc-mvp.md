@@ -17,7 +17,7 @@
   - server 能初始化数据目录和 SQLite schema。
   - agent 能通过 WebSocket hello/heartbeat 出现在 Web UI。
   - Web UI 能上传 `tar.gz`/`zip`，选择 agent 或 labels 创建 run。
-  - agent 能下载源码包、校验顶层单目录、运行固定脚本、回传日志和退出码。
+  - agent 能下载源码包、校验安全路径、定位固定脚本、运行固定脚本、回传日志和退出码。
   - failed/lost/canceled run 支持手动 rerun。
   - 日志保留策略代码存在，默认 7 天。
 - 前置条件：Cargo 可以解析依赖；如依赖下载被沙箱网络限制，需要按权限规则请求用户确认。
@@ -92,7 +92,7 @@
 - 本地 smoke test：
   - server 监听 `127.0.0.1:18080`。
   - 临时 agent `local-linux` 通过 WebSocket 注册。
-  - 上传包含顶层目录和 `run-build.sh` 的 `tar.gz`。
+  - 上传包含 `run-build.sh` 的 `tar.gz`。
   - run `run_d27d216d7ddf4394a94789f90b1a546b` 成功，exit code 为 `0`，日志包含 `smoke-start` 和 `smoke-ok`。
 - 不可执行验证项：Windows/macOS 原生执行器验证。
 - 残余风险：第一版不提供强隔离，脚本拥有 agent 进程权限；仅适合可信局域网和可信源码包。

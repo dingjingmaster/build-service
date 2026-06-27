@@ -46,7 +46,7 @@
   - 新增 SQLite schema 与 storage API。
   - 新增 server Web UI、upload、download、rerun、cancel、agent/ws、ui/ws。
   - 新增 agent WebSocket client、heartbeat、source download、archive extraction、script execution、log streaming、cancel handling。
-  - 新增 archive top-level single directory 和 unsafe path 校验。
+  - 新增 archive 解包和 unsafe path 校验；后续已放宽为支持脚本位于压缩包根目录或唯一顶层目录。
 - 影响的使用场景：
   - 用户可通过 Web UI 上传源码包并选择 agent 或 labels。
   - agent 可执行固定脚本并实时回传日志。

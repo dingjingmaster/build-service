@@ -403,9 +403,17 @@ Limits:
 
 ## Source Archive Contract
 
-Archives must contain exactly one top-level directory. The script must live in that directory.
+Archives can use either layout: put the script directly at the archive root, or put it inside a single top-level directory. The agent first looks for the script in the extraction root. If it is not there and the archive has one top-level directory, it looks inside that directory.
 
-Linux/macOS:
+Script at archive root:
+
+```text
+run-build.sh
+src/
+Makefile
+```
+
+Single top-level directory:
 
 ```text
 my-project/
@@ -413,15 +421,14 @@ my-project/
   src/
 ```
 
-Windows:
+For Windows, use `run-build.bat` instead:
 
 ```text
-my-project/
-  run-build.bat
-  src/
+run-build.bat
+src/
 ```
 
-The agent extracts the archive into its run workspace and executes the script from the source root. On Linux/macOS it first makes `run-build.sh` executable. Exit code `0` means success; any non-zero exit code means failure. After a successful script run, the agent deletes that `<work_dir>/runs/run_*` workspace. Failed, timed-out, or canceled runs are kept for inspection. On agent startup, historical `run_*` workspaces under `<work_dir>/runs` are cleaned automatically. stdout and stderr are streamed to the server.
+The agent extracts the archive into its run workspace and executes the script from the source root. On Linux/macOS it first makes `run-build.sh`, `*.sh`, and shebang script files executable. Exit code `0` means success; any non-zero exit code means failure. Script stdin is closed by default, so `ssh`, `scp`, and similar commands should use non-interactive key and known_hosts configuration instead of waiting for passwords or first-connect prompts. After a successful script run, the agent deletes that `<work_dir>/runs/run_*` workspace. Failed, timed-out, or canceled runs are kept for inspection. On agent startup, historical `run_*` workspaces under `<work_dir>/runs` are cleaned automatically. stdout and stderr are streamed to the server.
 
 ## Configuration
 

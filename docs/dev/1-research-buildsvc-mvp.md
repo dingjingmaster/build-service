@@ -24,7 +24,7 @@
   - 运行可不传参数，读取固定路径或开发 fallback 的 `buildsvc.ini`；也支持 `--config` 指定配置文件。
   - 配置文件为 INI，包含全量配置，按 role 读取相关段。
   - 平台暂定 Linux、Windows、macOS。
-  - 源码包支持 `tar.gz` 和 `zip`，顶层必须只有一个目录。
+  - 源码包支持 `tar.gz` 和 `zip`，脚本可位于压缩包根目录或唯一顶层目录。
   - Linux/macOS 执行 `run-build.sh`，执行前赋予可执行权限；Windows 执行 `run-build.bat`。
   - agent 可并发构建，每个 run 独立目录。
   - 日志保存一周。

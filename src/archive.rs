@@ -20,22 +20,15 @@ pub fn extract_archive(
     }
     fs::create_dir_all(destination).with_context(|| format!("create {}", destination.display()))?;
 
-    let top_dir = match format {
+    let top_dirs = match format {
         ArchiveFormat::TarGz => extract_tar_gz(archive_path, destination)?,
         ArchiveFormat::Zip => extract_zip(archive_path, destination)?,
     };
 
-    let source_root = destination.join(top_dir);
-    if !source_root.is_dir() {
-        bail!(
-            "archive top-level entry must be a directory: {}",
-            source_root.display()
-        );
-    }
-    Ok(source_root)
+    select_source_root(destination, top_dirs)
 }
 
-fn extract_tar_gz(archive_path: &Path, destination: &Path) -> anyhow::Result<PathBuf> {
+fn extract_tar_gz(archive_path: &Path, destination: &Path) -> anyhow::Result<BTreeSet<PathBuf>> {
     let file =
         File::open(archive_path).with_context(|| format!("open {}", archive_path.display()))?;
     let decoder = GzDecoder::new(file);
@@ -52,10 +45,10 @@ fn extract_tar_gz(archive_path: &Path, destination: &Path) -> anyhow::Result<Pat
             .with_context(|| format!("extract {}", path.display()))?;
     }
 
-    single_top_dir(top_dirs)
+    Ok(top_dirs)
 }
 
-fn extract_zip(archive_path: &Path, destination: &Path) -> anyhow::Result<PathBuf> {
+fn extract_zip(archive_path: &Path, destination: &Path) -> anyhow::Result<BTreeSet<PathBuf>> {
     let file =
         File::open(archive_path).with_context(|| format!("open {}", archive_path.display()))?;
     let mut archive = zip::ZipArchive::new(file)?;
@@ -80,7 +73,7 @@ fn extract_zip(archive_path: &Path, destination: &Path) -> anyhow::Result<PathBu
         }
     }
 
-    single_top_dir(top_dirs)
+    Ok(top_dirs)
 }
 
 fn validate_archive_path(path: &Path) -> anyhow::Result<PathBuf> {
@@ -104,14 +97,26 @@ fn validate_archive_path(path: &Path) -> anyhow::Result<PathBuf> {
     Ok(PathBuf::from(top_dir))
 }
 
-fn single_top_dir(top_dirs: BTreeSet<PathBuf>) -> anyhow::Result<PathBuf> {
-    if top_dirs.len() != 1 {
-        bail!(
-            "archive must contain exactly one top-level directory, found {}",
-            top_dirs.len()
-        );
+fn select_source_root(destination: &Path, top_dirs: BTreeSet<PathBuf>) -> anyhow::Result<PathBuf> {
+    if has_build_script(destination) {
+        return Ok(destination.to_owned());
     }
-    Ok(top_dirs.into_iter().next().expect("checked length"))
+
+    if top_dirs.len() == 1 {
+        let top_dir = top_dirs.into_iter().next().expect("checked length");
+        let source_root = destination.join(top_dir);
+        if source_root.is_dir() && has_build_script(&source_root) {
+            return Ok(source_root);
+        }
+    }
+
+    bail!(
+        "archive must contain run-build.sh/run-build.bat either at archive root or inside one top-level directory"
+    )
+}
+
+fn has_build_script(path: &Path) -> bool {
+    path.join("run-build.sh").is_file() || path.join("run-build.bat").is_file()
 }
 
 #[cfg(test)]
@@ -131,10 +136,41 @@ mod tests {
     }
 
     #[test]
-    fn requires_one_top_dir() {
+    fn selects_archive_root_when_script_is_at_root() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("run-build.sh"), b"#!/bin/sh\n").unwrap();
+        let mut dirs = BTreeSet::new();
+        dirs.insert(PathBuf::from("run-build.sh"));
+        dirs.insert(PathBuf::from("src"));
+
+        let root = select_source_root(temp.path(), dirs).unwrap();
+
+        assert_eq!(root, temp.path());
+    }
+
+    #[test]
+    fn selects_single_top_dir_when_script_is_inside_it() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("project")).unwrap();
+        fs::write(
+            temp.path().join("project").join("run-build.sh"),
+            b"#!/bin/sh\n",
+        )
+        .unwrap();
+        let mut dirs = BTreeSet::new();
+        dirs.insert(PathBuf::from("project"));
+
+        let root = select_source_root(temp.path(), dirs).unwrap();
+
+        assert_eq!(root, temp.path().join("project"));
+    }
+
+    #[test]
+    fn rejects_ambiguous_archive_without_root_script() {
+        let temp = tempfile::tempdir().unwrap();
         let mut dirs = BTreeSet::new();
         dirs.insert(PathBuf::from("a"));
         dirs.insert(PathBuf::from("b"));
-        assert!(single_top_dir(dirs).is_err());
+        assert!(select_source_root(temp.path(), dirs).is_err());
     }
 }
