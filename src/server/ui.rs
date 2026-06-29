@@ -198,6 +198,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .agents-table-scroll {
       max-height: 268px;
       overflow-y: auto;
+      overflow-x: hidden;
     }
     .table-scroll table { border: 0; }
     .table-scroll thead th {
@@ -291,14 +292,16 @@ const INDEX_HTML: &str = r#"<!doctype html>
     .run-select { width: 38px; text-align: center; }
     .run-agent { width: 62%; }
     .run-status { width: 30%; }
-    .agent-computer { width: 24%; }
-    .agent-ip { width: 15%; }
-    .agent-os { width: 8%; }
-    .agent-arch { width: 8%; }
-    .agent-version { width: 12%; }
-    .agent-running { width: 8%; }
-    .agent-status { width: 10%; }
-    .agent-terminal { width: 13%; }
+    .agents-table-scroll th, .agents-table-scroll td { padding-left: 6px; padding-right: 6px; }
+    .agent-computer { width: 19%; }
+    .agent-ip { width: 13%; }
+    .agent-os { width: 7%; }
+    .agent-arch { width: 7%; }
+    .agent-version { width: 10%; }
+    .agent-running { width: 7%; }
+    .agent-status { width: 9%; }
+    .agent-terminal { width: 11%; }
+    .agent-shutdown { width: 15%; }
     .upgrade-log {
       flex: 1;
       min-height: 520px;
@@ -468,6 +471,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                         <th class="agent-running">Tasks</th>
                         <th class="agent-status">Status</th>
                         <th class="agent-terminal">Terminal</th>
+                        <th class="agent-shutdown">关闭机器</th>
                       </tr>
                     </thead>
                     <tbody id="agentsBody"></tbody>
@@ -545,6 +549,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     let selectedBuilds = new Set();
     let selectedSubmitAgents = new Set();
     let selectedUpgradeAgents = new Set();
+    let shuttingDownAgents = new Set();
     let terminalSocket = null;
     let terminalAgent = null;
     let terminalLines = [[]];
@@ -777,6 +782,10 @@ const INDEX_HTML: &str = r#"<!doctype html>
       const upgradeAgentIds = new Set(state.agents.filter(isUpgradeAgentEnabled).map(agent => agent.id));
       selectedSubmitAgents = new Set([...selectedSubmitAgents].filter(agentId => submitAgentIds.has(agentId)));
       selectedUpgradeAgents = new Set([...selectedUpgradeAgents].filter(agentId => upgradeAgentIds.has(agentId)));
+      shuttingDownAgents = new Set([...shuttingDownAgents].filter(agentId => {
+        const agent = state.agents.find(item => item.id === agentId);
+        return agent && agent.status !== "offline";
+      }));
       agentsCount.textContent = `(${onlineAgents}/${state.agents.length})`;
       runsCount.textContent = `(${activeRuns}/${state.runs.length})`;
       selectAllSubmitAgents.disabled = state.agents.length === 0;
@@ -847,10 +856,14 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <td>${agent.running}/${agent.capacity}</td>
           <td title="${escapeHtml(display(agent.upgrade_status))}">${status(agent.status)}</td>
           <td><button class="secondary small" type="button" data-terminal="${escapeHtml(agent.id)}" ${agent.terminal_enabled && agent.status !== "offline" ? "" : "disabled"}>Open</button></td>
+          <td><button class="danger small" type="button" data-shutdown="${escapeHtml(agent.id)}" ${agent.status !== "offline" && !shuttingDownAgents.has(agent.id) ? "" : "disabled"} title="关闭 ${escapeHtml(display(agent.computer_name))}">关闭</button></td>
         </tr>`).join("");
 
       for (const button of agentsBody.querySelectorAll("button[data-terminal]")) {
         button.addEventListener("click", () => openTerminal(button.dataset.terminal));
+      }
+      for (const button of agentsBody.querySelectorAll("button[data-shutdown]")) {
+        button.addEventListener("click", () => shutdownAgent(button.dataset.shutdown, button));
       }
 
       const builds = [...state.builds].sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
@@ -1096,6 +1109,26 @@ const INDEX_HTML: &str = r#"<!doctype html>
       selectedUpgradeAgents = allSelected ? new Set() : new Set(agentIds);
       render();
     });
+
+    async function shutdownAgent(agentId, button) {
+      button.disabled = true;
+      shuttingDownAgents.add(agentId);
+      try {
+        const response = await fetch(`/api/agents/${encodeURIComponent(agentId)}/shutdown`, { method: "POST" });
+        if (!response.ok) {
+          alert(await response.text());
+          shuttingDownAgents.delete(agentId);
+          render();
+          return;
+        }
+        state = await response.json();
+      } catch (err) {
+        alert(String(err));
+        shuttingDownAgents.delete(agentId);
+      } finally {
+        render();
+      }
+    }
 
     rerunBtn.addEventListener("click", async () => {
       if (!selectedRun) return;

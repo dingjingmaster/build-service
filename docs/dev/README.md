@@ -30,3 +30,6 @@
 | 11 | 2026-06-26 | L2 | task | [11-task-agent-run-workspace-cleanup.md](11-task-agent-run-workspace-cleanup.md) | 已完成 | Agent 成功 run 自动删除当前工作区，启动时清理历史 run 工作区，失败保留现场。 |
 | 12 | 2026-06-26 | L2 | task | [12-task-flexible-archive-root.md](12-task-flexible-archive-root.md) | 已完成 | 源码包支持脚本直接位于压缩包根目录，兼容唯一顶层目录布局。 |
 | 13 | 2026-06-27 | L2 | task | [13-task-agent-script-permissions.md](13-task-agent-script-permissions.md) | 已完成 | Agent 执行前递归给 shell/shebang 脚本增加执行权限，并明确 ssh/scp 需非交互配置。 |
+| 14 | 2026-06-29 | L3 | research | [14-research-agent-machine-shutdown.md](14-research-agent-machine-shutdown.md) | 已完成 | Agents 表新增关闭机器入口的范围、风险和方案调研。 |
+| 14 | 2026-06-29 | L3 | plan | [14-plan-agent-machine-shutdown.md](14-plan-agent-machine-shutdown.md) | 已完成 | 通过 REST API 和 server-agent WebSocket 指令触发远程机器关机的实施计划。 |
+| 14 | 2026-06-29 | L3 | summary | [14-summary-agent-machine-shutdown.md](14-summary-agent-machine-shutdown.md) | 已完成 | Agents 表新增关闭机器列，在线 agent 可点击触发本机关机命令，表格隐藏横向溢出。 |

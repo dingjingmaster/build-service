@@ -204,6 +204,7 @@ pub async fn run(core: CoreConfig, server: ServerConfig) -> anyhow::Result<()> {
         .route("/api/runs/{run_id}/rerun", post(rerun))
         .route("/api/runs/{run_id}/cancel", post(cancel))
         .route("/api/agents/{agent_id}", delete(delete_agent))
+        .route("/api/agents/{agent_id}/shutdown", post(shutdown_agent))
         .route("/api/agents/{agent_id}/terminal/ws", get(terminal_ws))
         .route("/api/agent/ws", get(agent_ws))
         .route("/api/ui/ws", get(ui_ws))
@@ -761,6 +762,29 @@ async fn delete_agent(
         runtime.agent_tokens.remove(&agent_id);
         runtime.agent_metadata.remove(&agent_id);
     }
+    state.broadcast_state();
+    Ok(JsonResponse(state.ui_state()?))
+}
+
+async fn shutdown_agent(
+    State(state): State<AppState>,
+    Path(agent_id): Path<String>,
+) -> Result<JsonResponse<UiState>, ApiError> {
+    let sender = {
+        let runtime = state
+            .runtime
+            .lock()
+            .map_err(|_| anyhow::anyhow!("runtime poisoned"))?;
+        runtime
+            .agents
+            .get(&agent_id)
+            .with_context(|| format!("agent {agent_id} is offline"))?
+            .sender
+            .clone()
+    };
+    sender
+        .send(ServerToAgent::ShutdownMachine)
+        .map_err(|err| anyhow::anyhow!("failed to send shutdown request to agent: {err}"))?;
     state.broadcast_state();
     Ok(JsonResponse(state.ui_state()?))
 }

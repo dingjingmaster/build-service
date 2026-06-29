@@ -103,6 +103,7 @@ pub enum ServerToAgent {
     TerminalClose {
         session_id: String,
     },
+    ShutdownMachine,
     UpgradeStart {
         upgrade_id: String,
         package_url: String,

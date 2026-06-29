@@ -636,6 +636,10 @@ async fn handle_server_message(
         ServerToAgent::TerminalClose { session_id } => {
             let _ = send_terminal_command(&runtime, &session_id, TerminalCommand::Close).await;
         }
+        ServerToAgent::ShutdownMachine => {
+            info!("machine shutdown requested");
+            request_machine_shutdown().await?;
+        }
         ServerToAgent::UpgradeStart {
             upgrade_id,
             package_url,
@@ -1656,6 +1660,82 @@ async fn request_service_restart() -> anyhow::Result<()> {
     command
         .spawn()
         .context("spawn deferred systemctl restart buildsvc")?;
+    Ok(())
+}
+
+async fn request_machine_shutdown() -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        return request_linux_machine_shutdown().await;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return request_macos_machine_shutdown().await;
+    }
+    #[cfg(windows)]
+    {
+        return request_windows_machine_shutdown().await;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    {
+        bail!("machine shutdown is not supported on this platform");
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn request_linux_machine_shutdown() -> anyhow::Result<()> {
+    if command_exists("systemctl") {
+        let mut command = Command::new("systemctl");
+        command
+            .arg("--no-block")
+            .arg("poweroff")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command.spawn().context("spawn systemctl poweroff")?;
+        return Ok(());
+    }
+
+    if command_exists("shutdown") {
+        let mut command = Command::new("shutdown");
+        command
+            .arg("-h")
+            .arg("now")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command.spawn().context("spawn shutdown -h now")?;
+        return Ok(());
+    }
+
+    bail!("neither systemctl nor shutdown was found")
+}
+
+#[cfg(target_os = "macos")]
+async fn request_macos_machine_shutdown() -> anyhow::Result<()> {
+    let mut command = Command::new("shutdown");
+    command
+        .arg("-h")
+        .arg("now")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.spawn().context("spawn shutdown -h now")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn request_windows_machine_shutdown() -> anyhow::Result<()> {
+    let mut command = Command::new("shutdown");
+    command
+        .arg("/s")
+        .arg("/t")
+        .arg("0")
+        .arg("/f")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    command.spawn().context("spawn shutdown /s /t 0 /f")?;
     Ok(())
 }
 

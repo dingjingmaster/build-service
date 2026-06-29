@@ -2,8 +2,8 @@
 
 > 文档元数据
 > - 文档版本：v1.0.0
-> - 最后更新：2026-06-26
-> - 更新来源：docs/dev/1-*.md
+> - 最后更新：2026-06-29
+> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md
 > - 关联产品文档：docs/overview-product.md
 
 ## 1. 技术栈
@@ -27,7 +27,7 @@
   - `protocol`：agent/server/UI JSON 消息和 UI view model。
   - `storage`：SQLite schema、build/run 状态、日志文件。
   - `server`：HTTP API、Web UI、agent WebSocket、调度。
-  - `agent`：WebSocket client、源码下载、解包、脚本执行、日志回传、PTY 终端会话。
+  - `agent`：WebSocket client、源码下载、解包、脚本执行、日志回传、PTY 终端会话、机器关机命令调度。
   - `archive`：跨格式解包与路径校验。
 - 进程/线程边界：
   - server 和每个 agent 是独立进程。
@@ -42,6 +42,7 @@
   - Agent 通过 HTTP 下载源码包。
   - Agent 通过 WebSocket 回传状态和日志。
   - Web terminal 通过 browser-server WebSocket 和 server-agent WebSocket 双跳转发输入输出。
+  - Remote shutdown 通过 browser REST API 和 server-agent WebSocket 转发，agent 在本机调度系统关机命令。
 - Web UI：
   - Builds tab 显示编译主流程：Submit Build、Runs、Builds、Agents、Run Log。
   - Upgrades tab 显示远程升级流程：升级包上传、升级 agent 选择、升级日志。
@@ -51,6 +52,7 @@
   - run delete 由 server API 触发，server 通过 agent WebSocket 等待工作区删除确认后再删除 SQLite 记录。
   - terminal start/input/resize/close 由 browser WebSocket 触发，server 转发给在线 agent。
   - upgrade start 由 browser 上传包触发，server 保存包并下发给在线 agent，agent 下载校验后调用系统包管理器安装并请求重启 service。
+  - machine shutdown 由 browser API 触发，server 向在线 agent 下发 `shutdown_machine`，agent 调度本机系统关机命令。
 - 外部依赖：
   - 无外部数据库或消息队列。
   - agent 执行脚本和 terminal shell 依赖本机 shell 和编译环境。
@@ -59,7 +61,7 @@
 
 | 接口/协议/ABI | 调用方 | 提供方 | 兼容约束 | 说明 |
 |---------------|--------|--------|----------|------|
-| `/api/agent/ws` | agent | server | JSON text WebSocket | hello、computer_name、heartbeat、run_start、run_log、run_finished、run_cancel、run_delete、run_deleted、terminal_start/input/resize/close、terminal_output/exit、upgrade_start/status/log |
+| `/api/agent/ws` | agent | server | JSON text WebSocket | hello、computer_name、heartbeat、run_start、run_log、run_finished、run_cancel、run_delete、run_deleted、terminal_start/input/resize/close、terminal_output/exit、upgrade_start/status/log、shutdown_machine |
 | `/api/ui/ws` | browser | server | JSON text WebSocket | 推送完整 UI state 和日志增量 |
 | `/api/agents/{name}/terminal/ws` | browser | server | JSON text WebSocket | 为在线 agent 打开 PTY 终端会话并转发输入输出 |
 | `POST /api/builds` | browser | server | multipart form | 上传 source，传 target agents |
@@ -67,6 +69,7 @@
 | `GET /api/upgrades/{id}/package` | agent | server | agent id/token header | 下载已下发升级包 |
 | `DELETE /api/builds/{id}` | browser | server | build with no runs only | 删除 server 侧 source 目录和 build 记录 |
 | `DELETE /api/agents/{name}` | browser | server | offline agent only | 从 server 运行时 agent 列表删除离线 agent |
+| `POST /api/agents/{name}/shutdown` | browser | server | online agent only | 通过 agent WebSocket 请求对应机器关机 |
 | `GET /api/runs/{id}/source` | agent | server | agent id/token header | 下载已分配源码包 |
 | `GET /api/runs/{id}/log` | browser | server | text/plain | 读取 run 完整日志 |
 | `DELETE /api/runs/{id}` | browser | server | terminal run only | 请求对应在线 agent 删除工作区，确认后删除 run 记录和日志 |
@@ -134,6 +137,7 @@
 | 权限/系统调用 | agent 运行用户脚本、PTY shell 并终止进程组/终端会话 | Linux 编译验证；Windows/macOS 需后续实机验证 | docs/dev/1-plan-buildsvc-mvp.md |
 | Web 终端 | 键盘输入、resize、关闭会话和断线清理 | 本地 server/agent PTY smoke；Windows/macOS 需实机补测 | docs/dev/4-task-agent-terminal.md |
 | 远程升级 | 系统包安装权限、配置文件保护、service 重启、升级过程中 WebSocket 断开 | Linux 编译验证；deb/rpm/Gentoo 需目标系统实机验证 | docs/dev/6-task-agent-package-upgrade.md |
+| 远程关机 | agent 进程权限、目标系统关机命令、点击后不可逆系统副作用 | Rust 编译/测试和代码审查；真实关机需专用测试机手工验证 | docs/dev/14-*.md |
 | 文件系统 | archive 路径穿越和顶层目录约束 | archive 单元测试 | docs/dev/1-plan-buildsvc-mvp.md |
 | 数据保留 | 日志保留和运行中任务重启恢复 | storage 测试和人工审查 | docs/dev/1-plan-buildsvc-mvp.md |
 
@@ -152,6 +156,7 @@
   - archive 路径校验单元测试。
   - storage create/rerun/log 单元测试。
   - 本地 server/agent/source upload smoke test。
+  - 远程关机不在普通自动化验证中执行；需专用测试机手工验证。
   - Windows/macOS 执行器需实机补测。
 - 最小人工验证步骤：
   - 准备 server/agent 两份 INI 配置。
@@ -204,3 +209,4 @@
 | 日期 | 变更 | 影响 | 关联文档 |
 |------|------|------|----------|
 | 2026-06-26 | 创建 Rust MVP 开发概览 | 明确模块、接口、数据、验证和部署边界 | docs/dev/1-*.md |
+| 2026-06-29 | 新增远程关机 API 和 agent 指令 | Agents 表可向在线 agent 下发机器关机请求，增加系统副作用风险项 | docs/dev/14-*.md |
