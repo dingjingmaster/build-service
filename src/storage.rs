@@ -336,6 +336,7 @@ impl Storage {
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let ids = collect_rows(rows)?;
         drop(stmt);
+        drop(conn);
         for id in &ids {
             self.update_run_status(id, "lost")?;
         }
@@ -351,6 +352,7 @@ impl Storage {
         let rows = stmt.query_map(params![agent_id], |row| row.get::<_, String>(0))?;
         let ids = collect_rows(rows)?;
         drop(stmt);
+        drop(conn);
         for id in &ids {
             self.update_run_status(id, "lost")?;
         }
@@ -674,6 +676,105 @@ mod tests {
         storage.delete_build("build_1").unwrap();
         assert!(storage.get_build("build_1").unwrap().is_none());
         assert!(!source_dir.exists());
+    }
+
+    #[test]
+    fn marks_active_runs_lost_without_deadlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            Storage::open(dir.path().to_path_buf(), dir.path().join("buildsvc.db")).unwrap();
+        let source_dir = storage.sources_dir().join("build_active");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("source.tar.gz");
+        fs::write(&source, b"fake").unwrap();
+
+        storage
+            .create_build(
+                "build_active",
+                "source.tar.gz",
+                ArchiveFormat::TarGz,
+                &source,
+                &[
+                    NewRun {
+                        id: "run_active_1".to_owned(),
+                        agent_id: "agent_1".to_owned(),
+                        labels: Vec::new(),
+                        script_timeout_sec: 60,
+                    },
+                    NewRun {
+                        id: "run_active_2".to_owned(),
+                        agent_id: "agent_2".to_owned(),
+                        labels: Vec::new(),
+                        script_timeout_sec: 60,
+                    },
+                ],
+            )
+            .unwrap();
+
+        storage.mark_run_assigned("run_active_1").unwrap();
+        storage
+            .update_run_status("run_active_2", "running")
+            .unwrap();
+
+        let mut lost = storage.mark_active_runs_lost().unwrap();
+        lost.sort();
+        assert_eq!(lost, vec!["run_active_1", "run_active_2"]);
+        assert_eq!(
+            storage.get_run("run_active_1").unwrap().unwrap().status,
+            "lost"
+        );
+        assert_eq!(
+            storage.get_run("run_active_2").unwrap().unwrap().status,
+            "lost"
+        );
+    }
+
+    #[test]
+    fn marks_agent_runs_lost_without_deadlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            Storage::open(dir.path().to_path_buf(), dir.path().join("buildsvc.db")).unwrap();
+        let source_dir = storage.sources_dir().join("build_agent_active");
+        fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("source.tar.gz");
+        fs::write(&source, b"fake").unwrap();
+
+        storage
+            .create_build(
+                "build_agent_active",
+                "source.tar.gz",
+                ArchiveFormat::TarGz,
+                &source,
+                &[
+                    NewRun {
+                        id: "run_agent_1".to_owned(),
+                        agent_id: "agent_1".to_owned(),
+                        labels: Vec::new(),
+                        script_timeout_sec: 60,
+                    },
+                    NewRun {
+                        id: "run_agent_2".to_owned(),
+                        agent_id: "agent_2".to_owned(),
+                        labels: Vec::new(),
+                        script_timeout_sec: 60,
+                    },
+                ],
+            )
+            .unwrap();
+
+        storage.mark_run_assigned("run_agent_1").unwrap();
+        storage.mark_run_assigned("run_agent_2").unwrap();
+
+        let lost = storage.mark_agent_runs_lost("agent_1").unwrap();
+        assert_eq!(lost, vec!["run_agent_1"]);
+        assert_eq!(
+            storage.get_run("run_agent_1").unwrap().unwrap().status,
+            "lost"
+        );
+        assert_eq!(
+            storage.get_run("run_agent_2").unwrap().unwrap().status,
+            "assigned"
+        );
     }
 
     #[test]

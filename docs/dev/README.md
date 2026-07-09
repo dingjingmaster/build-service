@@ -33,3 +33,4 @@
 | 14 | 2026-06-29 | L3 | research | [14-research-agent-machine-shutdown.md](14-research-agent-machine-shutdown.md) | 已完成 | Agents 表新增关闭机器入口的范围、风险和方案调研。 |
 | 14 | 2026-06-29 | L3 | plan | [14-plan-agent-machine-shutdown.md](14-plan-agent-machine-shutdown.md) | 已完成 | 通过 REST API 和 server-agent WebSocket 指令触发远程机器关机的实施计划。 |
 | 14 | 2026-06-29 | L3 | summary | [14-summary-agent-machine-shutdown.md](14-summary-agent-machine-shutdown.md) | 已完成 | Agents 表新增关闭机器列，在线 agent 可点击触发本机关机命令，表格隐藏横向溢出。 |
+| 15 | 2026-07-09 | L2 | fix | [15-fix-buildsvc-startup-deadlock.md](15-fix-buildsvc-startup-deadlock.md) | 已完成 | 修复 server 启动时 active run 标记 lost 持锁重入导致无端口监听的问题。 |
