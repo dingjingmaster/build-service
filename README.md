@@ -50,7 +50,9 @@ cargo test
 
 包内文件：
 
-- `/usr/bin/buildsvc`
+- `/usr/local/buildsvc/bin/buildsvc`
+- `/usr/local/buildsvc/lib/*`（编译时收集的动态库和动态加载器）
+- `/usr/local/buildsvc/scripts/buildsvc.sh`
 - `/etc/buildsvc/buildsvc.ini`
 - `/usr/lib/systemd/system/buildsvc.service`
 - `/usr/share/doc/buildsvc/examples/buildsvc.ini`
@@ -174,7 +176,7 @@ sudo systemctl status buildsvc
 如果机器使用 OpenRC，当前包暂未安装 OpenRC init script，可以先直接运行：
 
 ```bash
-sudo /usr/bin/buildsvc
+    sudo /usr/local/buildsvc/scripts/buildsvc.sh
 ```
 
 卸载：
@@ -206,7 +208,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/buildsvc
+ExecStart=/usr/local/buildsvc/scripts/buildsvc.sh
 Restart=always
 RestartSec=3
 
@@ -359,7 +361,7 @@ journalctl -u buildsvc -f
 默认 unit 不传命令行参数：
 
 ```ini
-ExecStart=/usr/bin/buildsvc
+ExecStart=/usr/local/buildsvc/scripts/buildsvc.sh
 ```
 
 因此它会自动读取默认配置文件：

@@ -50,7 +50,9 @@ Linux package artifacts are written under `target/package/`. deb, rpm, and Gento
 
 Generated packages install:
 
-- `/usr/bin/buildsvc`
+- `/usr/local/buildsvc/bin/buildsvc`
+- `/usr/local/buildsvc/lib/*` (the dynamic libraries and loader collected at build time)
+- `/usr/local/buildsvc/scripts/buildsvc.sh`
 - `/etc/buildsvc/buildsvc.ini`
 - `/usr/lib/systemd/system/buildsvc.service`
 - `/usr/share/doc/buildsvc/examples/buildsvc.ini`
@@ -168,7 +170,7 @@ sudo systemctl status buildsvc
 On OpenRC hosts, this package does not yet install an OpenRC init script. Run it directly for now:
 
 ```bash
-sudo /usr/bin/buildsvc
+    sudo /usr/local/buildsvc/scripts/buildsvc.sh
 ```
 
 Uninstall:
@@ -200,7 +202,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/buildsvc
+ExecStart=/usr/local/buildsvc/scripts/buildsvc.sh
 Restart=always
 RestartSec=3
 
@@ -353,7 +355,7 @@ journalctl -u buildsvc -f
 The packaged systemd unit runs without command-line arguments:
 
 ```ini
-ExecStart=/usr/bin/buildsvc
+ExecStart=/usr/local/buildsvc/scripts/buildsvc.sh
 ```
 
 Default config discovery:

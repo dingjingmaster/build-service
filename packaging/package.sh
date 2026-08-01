@@ -20,6 +20,34 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
+collect_runtime_libs() {
+    dest="$1"
+    libdir="$dest/usr/local/buildsvc/lib"
+    loader=$(readelf -l "$BIN" | sed -n 's/.*Requesting program interpreter: \([^]]*\)].*/\1/p')
+
+    if [ -z "$loader" ] || [ ! -r "$loader" ]; then
+        echo "unable to locate ELF interpreter for: $BIN" >&2
+        exit 1
+    fi
+
+    mkdir -p "$libdir"
+    install -Dm755 "$loader" "$libdir/$(basename "$loader")"
+
+    ldd "$BIN" |
+        awk '/=>/ && $3 ~ /^\// { print $3 } /^[[:space:]]*\// { print $1 }' |
+        while IFS= read -r dependency; do
+            [ -r "$dependency" ] || continue
+            install -Dm755 "$dependency" "$libdir/$(basename "$dependency")"
+        done
+}
+
+install_runtime_bundle() {
+    dest="$1"
+    install -Dm755 "$BIN" "$dest/usr/local/buildsvc/bin/buildsvc"
+    install -Dm755 "$ROOT_DIR/packaging/buildsvc.sh" "$dest/usr/local/buildsvc/scripts/buildsvc.sh"
+    collect_runtime_libs "$dest"
+}
+
 mkdir -p "$OUT_DIR"
 
 host_arch() {
@@ -74,7 +102,7 @@ stage_root() {
     dest="$1"
     rm -rf "$dest"
     mkdir -p "$dest"
-    install -Dm755 "$BIN" "$dest/usr/bin/buildsvc"
+    install_runtime_bundle "$dest"
     install -Dm644 "$(package_config_src)" "$dest/etc/buildsvc/buildsvc.ini"
     install -Dm644 "$ROOT_DIR/packaging/buildsvc.service" "$dest/usr/lib/systemd/system/buildsvc.service"
     install_examples "$dest"
@@ -248,7 +276,9 @@ fi
 %files
 %dir /etc/buildsvc
 %config(noreplace) /etc/buildsvc/buildsvc.ini
-%attr(0755,root,root) /usr/bin/buildsvc
+/usr/local/buildsvc/bin/buildsvc
+/usr/local/buildsvc/lib/*
+/usr/local/buildsvc/scripts/buildsvc.sh
 /usr/lib/systemd/system/buildsvc.service
 %dir /usr/share/doc/buildsvc
 %dir /usr/share/doc/buildsvc/examples
@@ -271,7 +301,8 @@ build_emerge() {
     rm -rf "$overlay"
     mkdir -p "$files" "$overlay/metadata" "$overlay/profiles"
 
-    install -Dm755 "$BIN" "$files/buildsvc"
+    payload="$files/payload"
+    install_runtime_bundle "$payload"
     install -Dm644 "$(package_config_src)" "$files/buildsvc.ini"
     install -Dm644 "$ROOT_DIR/packaging/buildsvc.service" "$files/buildsvc.service"
     if [ -f "$ROOT_DIR/configs/server.ini" ]; then
@@ -299,12 +330,19 @@ LICENSE="MIT"
 SLOT="0"
 KEYWORDS="$keywords"
 RESTRICT="strip"
-QA_PREBUILT="/usr/bin/buildsvc"
+QA_PREBUILT="/usr/local/buildsvc/bin/buildsvc"
 
 S="\${WORKDIR}"
 
 src_install() {
-	dobin "\${FILESDIR}/buildsvc"
+	insinto /usr/local/buildsvc/bin
+	doins "\${FILESDIR}/payload/usr/local/buildsvc/bin/buildsvc"
+	fperms 0755 /usr/local/buildsvc/bin/buildsvc
+	insinto /usr/local/buildsvc/lib
+	doins "\${FILESDIR}"/payload/usr/local/buildsvc/lib/*
+	insinto /usr/local/buildsvc/scripts
+	doins "\${FILESDIR}/payload/usr/local/buildsvc/scripts/buildsvc.sh"
+	fperms 0755 /usr/local/buildsvc/scripts/buildsvc.sh
 
 	insinto /etc/buildsvc
 	newins "\${FILESDIR}/buildsvc.ini" buildsvc.ini

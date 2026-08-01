@@ -113,7 +113,9 @@
   - 删除 run 时，agent 删除 `<agent_work_dir>/runs/<run_id>`，server 删除 `runs` 表记录和 `<server_data_dir>/logs/<run_id>.log`。
   - terminal session 当前不持久化命令记录和输出日志。
 - Linux 包安装内容：
-  - `/usr/bin/buildsvc`。
+  - `/usr/local/buildsvc/bin/buildsvc`。
+  - `/usr/local/buildsvc/lib/*`（构建时收集的动态库和动态加载器）。
+  - `/usr/local/buildsvc/scripts/buildsvc.sh`。
   - `/etc/buildsvc/buildsvc.ini`。
   - `/usr/lib/systemd/system/buildsvc.service`。
   - `/usr/share/doc/buildsvc/examples/buildsvc.ini`，以及存在时的 `server.ini` 和 `agent.ini`。
@@ -167,7 +169,7 @@
 
 ## 7. 发布与回滚
 
-- 产物：`buildsvc` 单二进制。
+- 产物：`buildsvc` 二进制及其构建机动态库运行时 bundle。
 - Linux 包产物：
   - deb：`target/package/buildsvc_<version>-1_<arch>.deb`。
   - rpm：`target/package/buildsvc-<version>-1.<arch>.rpm`。
