@@ -23,5 +23,4 @@ if [ -z "$loader" ]; then
     exit 1
 fi
 
-export LD_LIBRARY_PATH="$LIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 exec "$loader" --library-path "$LIB" "$BIN" "$@"
