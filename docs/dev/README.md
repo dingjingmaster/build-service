@@ -35,3 +35,4 @@
 | 14 | 2026-06-29 | L3 | summary | [14-summary-agent-machine-shutdown.md](14-summary-agent-machine-shutdown.md) | 已完成 | Agents 表新增关闭机器列，在线 agent 可点击触发本机关机命令，表格隐藏横向溢出。 |
 | 15 | 2026-07-09 | L2 | fix | [15-fix-buildsvc-startup-deadlock.md](15-fix-buildsvc-startup-deadlock.md) | 已完成 | 修复 server 启动时 active run 标记 lost 持锁重入导致无端口监听的问题。 |
 | 16 | 2026-08-01 | L2 | fix | [16-fix-buildsvc-child-library-path.md](16-fix-buildsvc-child-library-path.md) | 已完成（待部署） | 修复随包动态库通过 LD_LIBRARY_PATH 污染 bash、systemctl 和构建脚本导致段错误的问题。 |
+| 17 | 2026-08-03 | L3 | research/plan/summary | [17-research-agent-shutdown-permission.md](17-research-agent-shutdown-permission.md)、[17-plan-agent-shutdown-permission.md](17-plan-agent-shutdown-permission.md)、[17-summary-agent-shutdown-permission.md](17-summary-agent-shutdown-permission.md) | 已完成 | 为 agent 增加远程关机权限配置，并在 UI、server API 和 agent 本地双重防护。 |

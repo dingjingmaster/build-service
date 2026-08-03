@@ -69,6 +69,7 @@ pub struct AgentConfig {
     pub terminal_work_dir: PathBuf,
     pub terminal_max_sessions: usize,
     pub upgrade_enabled: bool,
+    pub shutdown_enabled: bool,
     pub upgrade_work_dir: PathBuf,
 }
 
@@ -222,6 +223,7 @@ fn parse_agent_config(
             .unwrap_or_else(|| work_dir.join("terminal")),
         terminal_max_sessions: parse_usize(section, "terminal_max_sessions", 1)?.max(1),
         upgrade_enabled: parse_bool(optional(section, "upgrade_enabled").unwrap_or("false"))?,
+        shutdown_enabled: parse_bool(optional(section, "shutdown_enabled").unwrap_or("false"))?,
         upgrade_work_dir: optional(section, "upgrade_work_dir")
             .map(PathBuf::from)
             .unwrap_or_else(|| work_dir.join("upgrades")),
@@ -395,6 +397,7 @@ mod tests {
         );
         assert_eq!(agent.terminal_max_sessions, 1);
         assert!(!agent.upgrade_enabled);
+        assert!(!agent.shutdown_enabled);
         assert_eq!(
             agent.upgrade_work_dir,
             PathBuf::from("/tmp/buildsvc-agent/work/upgrades")

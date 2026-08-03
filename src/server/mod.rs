@@ -85,6 +85,7 @@ struct AgentRuntime {
     concurrency: usize,
     terminal_enabled: bool,
     upgrade_enabled: bool,
+    shutdown_enabled: bool,
     upgrade_status: Option<String>,
     running: HashSet<String>,
     last_seen: i64,
@@ -779,6 +780,13 @@ async fn shutdown_agent(
             .agents
             .get(&agent_id)
             .with_context(|| format!("agent {agent_id} is offline"))?
+            .shutdown_enabled
+            .then_some(())
+            .with_context(|| format!("agent {agent_id} does not allow machine shutdown"))?;
+        runtime
+            .agents
+            .get(&agent_id)
+            .with_context(|| format!("agent {agent_id} is offline"))?
             .sender
             .clone()
     };
@@ -944,6 +952,7 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
         concurrency,
         terminal_enabled,
         upgrade_enabled,
+        shutdown_enabled,
         version,
     } = hello
     else {
@@ -979,6 +988,7 @@ async fn agent_ws_inner(state: AppState, socket: WebSocket) -> anyhow::Result<()
                 concurrency: concurrency.max(1),
                 terminal_enabled,
                 upgrade_enabled,
+                shutdown_enabled,
                 upgrade_status: None,
                 running: HashSet::new(),
                 last_seen: now_ts(),
@@ -1453,6 +1463,7 @@ impl AppState {
                     last_seen: Some(live.last_seen),
                     terminal_enabled: self.server.terminal_enabled && live.terminal_enabled,
                     upgrade_enabled: self.server.upgrade_enabled && live.upgrade_enabled,
+                    shutdown_enabled: live.shutdown_enabled,
                     upgrade_status: live.upgrade_status.clone(),
                 });
             } else {
@@ -1489,6 +1500,7 @@ impl AppState {
                     last_seen: None,
                     terminal_enabled: false,
                     upgrade_enabled: false,
+                    shutdown_enabled: false,
                     upgrade_status: None,
                 });
             }

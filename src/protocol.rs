@@ -15,6 +15,8 @@ pub enum AgentToServer {
         terminal_enabled: bool,
         #[serde(default)]
         upgrade_enabled: bool,
+        #[serde(default)]
+        shutdown_enabled: bool,
         version: String,
     },
     Heartbeat {
@@ -262,6 +264,7 @@ pub struct AgentView {
     pub last_seen: Option<i64>,
     pub terminal_enabled: bool,
     pub upgrade_enabled: bool,
+    pub shutdown_enabled: bool,
     pub upgrade_status: Option<String>,
 }
 
@@ -339,11 +342,14 @@ mod tests {
             env!("CARGO_PKG_VERSION")
         );
         let AgentToServer::Hello {
-            upgrade_enabled, ..
+            upgrade_enabled,
+            shutdown_enabled,
+            ..
         } = serde_json::from_str(&message).unwrap()
         else {
             panic!("expected hello");
         };
         assert!(!upgrade_enabled);
+        assert!(!shutdown_enabled);
     }
 }

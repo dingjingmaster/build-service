@@ -149,6 +149,7 @@ async fn run_once(config: AgentConfig, identity: AgentIdentity) -> anyhow::Resul
         concurrency: config.concurrency.max(1),
         terminal_enabled: config.terminal_enabled,
         upgrade_enabled: config.upgrade_enabled,
+        shutdown_enabled: config.shutdown_enabled,
         version: env!("CARGO_PKG_VERSION").to_owned(),
     })?;
 
@@ -637,6 +638,10 @@ async fn handle_server_message(
             let _ = send_terminal_command(&runtime, &session_id, TerminalCommand::Close).await;
         }
         ServerToAgent::ShutdownMachine => {
+            if !runtime.config.shutdown_enabled {
+                warn!("machine shutdown request rejected by agent configuration");
+                return Ok(());
+            }
             info!("machine shutdown requested");
             request_machine_shutdown().await?;
         }

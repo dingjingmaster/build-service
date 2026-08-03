@@ -856,7 +856,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <td>${agent.running}/${agent.capacity}</td>
           <td title="${escapeHtml(display(agent.upgrade_status))}">${status(agent.status)}</td>
           <td><button class="secondary small" type="button" data-terminal="${escapeHtml(agent.id)}" ${agent.terminal_enabled && agent.status !== "offline" ? "" : "disabled"}>Open</button></td>
-          <td><button class="danger small" type="button" data-shutdown="${escapeHtml(agent.id)}" ${agent.status !== "offline" && !shuttingDownAgents.has(agent.id) ? "" : "disabled"} title="关闭 ${escapeHtml(display(agent.computer_name))}">关闭</button></td>
+          <td><button class="danger small" type="button" data-shutdown="${escapeHtml(agent.id)}" ${agent.status !== "offline" && agent.shutdown_enabled && !shuttingDownAgents.has(agent.id) ? "" : "disabled"} title="关闭 ${escapeHtml(display(agent.computer_name))}">关闭</button></td>
         </tr>`).join("");
 
       for (const button of agentsBody.querySelectorAll("button[data-terminal]")) {

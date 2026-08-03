@@ -59,7 +59,7 @@
 6. agent 通过 WebSocket 回传日志、状态和最终退出码。
 7. server 更新 Web UI，并允许用户对结束 run 手动 rerun 或 delete。
 8. 用户可从 Agents 列表打开终端；server 只转发浏览器输入输出，agent 在本机打开 shell/PTTY。
-9. 用户可从 Agents 列表点击关闭机器；server 通过 agent WebSocket 下发关机指令，agent 调用本机系统关机命令。
+9. 用户可从 Agents 列表点击关闭机器；仅配置允许关机且在线的 agent 可操作，server 通过 agent WebSocket 下发关机指令，agent 调用本机系统关机命令。
 ```
 
 ## 5. 产品规则
@@ -92,7 +92,7 @@
   - Builds 列表支持多选、全选和 Delete 键删除；删除仅清理 server 侧源码包和 build 记录，不触碰 agent 工作区。
   - Agents 列表对在线且启用终端的 agent 显示 `Open` 入口，打开后进入 Web 终端面板。
   - 终端能力默认配置关闭；server 和 agent 侧都启用时才允许打开。
-  - Agents 列表对在线 agent 显示“关闭机器”入口，点击后直接向该 agent 下发机器关机请求；离线 agent 不可点击。
+  - Agents 列表仅对配置允许关机且在线的 agent 启用“关闭机器”入口；未允许或离线 agent 的按钮置灰，server API 也拒绝未授权请求。
 
 ## 6. 非功能要求
 
@@ -117,3 +117,4 @@
 |------|------|------|----------|
 | 2026-06-26 | 创建 MVP 产品边界 | 明确 server/agent/Web UI/固定脚本执行模型 | docs/dev/1-*.md |
 | 2026-06-29 | Agents 表新增远程关机入口 | 在线 agent 可从 Web UI 直接触发关闭所在机器 | docs/dev/14-*.md |
+| 2026-08-03 | Agent 增加远程关机权限配置 | `[agent].shutdown_enabled` 默认关闭；未授权 agent 的 UI 按钮置灰且 API 拒绝请求 | docs/dev/17-*.md |
