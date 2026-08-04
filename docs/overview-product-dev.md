@@ -101,7 +101,7 @@
   - `agent.terminal_work_dir` 默认 `<agent_work_dir>/terminal`。
   - `agent.terminal_max_sessions` 默认 1。
   - `agent.upgrade_enabled` 默认 `false`；打开后 agent hello 上报升级能力并可执行远程包升级。
-  - `agent.shutdown_enabled` 默认 `false`；打开后 agent hello 上报关机能力，server 仅允许对该 agent 下发关机指令。
+  - `agent.shutdown_enabled` 默认 `true`；显式设置为 `false` 时 agent hello 上报未授权状态，server 不允许对该 agent 下发关机指令。
   - `agent.upgrade_work_dir` 默认 `<agent_work_dir>/upgrades`。
 - 持久化数据：
   - SQLite：`<server_data_dir>/buildsvc.db`。

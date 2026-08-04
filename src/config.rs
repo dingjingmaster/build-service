@@ -223,7 +223,7 @@ fn parse_agent_config(
             .unwrap_or_else(|| work_dir.join("terminal")),
         terminal_max_sessions: parse_usize(section, "terminal_max_sessions", 1)?.max(1),
         upgrade_enabled: parse_bool(optional(section, "upgrade_enabled").unwrap_or("false"))?,
-        shutdown_enabled: parse_bool(optional(section, "shutdown_enabled").unwrap_or("false"))?,
+        shutdown_enabled: parse_bool(optional(section, "shutdown_enabled").unwrap_or("true"))?,
         upgrade_work_dir: optional(section, "upgrade_work_dir")
             .map(PathBuf::from)
             .unwrap_or_else(|| work_dir.join("upgrades")),
@@ -397,10 +397,27 @@ mod tests {
         );
         assert_eq!(agent.terminal_max_sessions, 1);
         assert!(!agent.upgrade_enabled);
-        assert!(!agent.shutdown_enabled);
+        assert!(agent.shutdown_enabled);
         assert_eq!(
             agent.upgrade_work_dir,
             PathBuf::from("/tmp/buildsvc-agent/work/upgrades")
         );
+    }
+
+    #[test]
+    fn parses_explicit_shutdown_disabled() {
+        let config = AppConfig::from_ini_str(
+            r#"
+            [core]
+            role = agent
+
+            [agent]
+            server_url = ws://127.0.0.1:8080/api/agent/ws
+            shutdown_enabled = false
+            "#,
+        )
+        .unwrap();
+
+        assert!(!config.agent.unwrap().shutdown_enabled);
     }
 }

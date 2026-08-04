@@ -493,7 +493,7 @@ server 不需要预置 agent。agent 首次连接时会自动加入运行时列�
 | `terminal_work_dir` | Web 终端工作目录 | `<work_dir>/terminal` |
 | `terminal_max_sessions` | 同时允许的终端会话数 | `1` |
 | `upgrade_enabled` | 是否允许此 agent 执行远程包升级 | `false` |
-| `shutdown_enabled` | 是否允许 server 从 Web UI 关闭此 agent 所在机器 | `false` |
+| `shutdown_enabled` | 是否允许 server 从 Web UI 关闭此 agent 所在机器 | `true` |
 | `upgrade_work_dir` | 远程升级包下载和解包目录 | `<work_dir>/upgrades` |
 
 ### 最小配置示例
@@ -546,5 +546,5 @@ upgrade_enabled = false
 - agent ID 和 token 由 agent 自动生成并保存在 `<data_dir>/agent.id` 和 `<data_dir>/agent.token`，不要把这些文件暴露给不可信用户。
 - Web 终端等同于在 agent 机器上执行命令，默认关闭；仅在信任 server 和网络边界时启用。
 - 远程升级等同于允许 Web UI 在 agent 机器上安装系统包并重启 service，默认关闭；仅在可信网络和可信 server 上启用。
-- 远程关机默认关闭；只有 agent 配置 `shutdown_enabled=true` 时，Web UI 才允许 server 关闭该 agent 所在机器。
+- 远程关机默认允许；只有 agent 配置 `shutdown_enabled=false` 时，Web UI 才禁止 server 关闭该 agent 所在机器。
 - `public_url` 必须是 agent 可以访问的地址，不要只写 server 本机的 `127.0.0.1`，除非 agent 和 server 在同一台机器上。

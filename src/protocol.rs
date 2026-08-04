@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+fn default_shutdown_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentToServer {
@@ -15,7 +19,7 @@ pub enum AgentToServer {
         terminal_enabled: bool,
         #[serde(default)]
         upgrade_enabled: bool,
-        #[serde(default)]
+        #[serde(default = "default_shutdown_enabled")]
         shutdown_enabled: bool,
         version: String,
     },
@@ -350,6 +354,6 @@ mod tests {
             panic!("expected hello");
         };
         assert!(!upgrade_enabled);
-        assert!(!shutdown_enabled);
+        assert!(shutdown_enabled);
     }
 }

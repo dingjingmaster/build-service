@@ -207,6 +207,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       z-index: 1;
       background: var(--panel);
     }
+    .agents-table-scroll tr.shutdown-disabled td { background: #fff8dc; }
     th, td {
       padding: 8px 10px;
       border-bottom: 1px solid var(--line);
@@ -679,6 +680,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
     }
 
     function compareAgents(left, right) {
+      const leftShutdownDisabled = !left.shutdown_enabled;
+      const rightShutdownDisabled = !right.shutdown_enabled;
+      if (leftShutdownDisabled !== rightShutdownDisabled) {
+        return leftShutdownDisabled ? -1 : 1;
+      }
+
       let result = 0;
       if (agentSort.key === "ip") {
         const leftIp = ipv4Parts(left.ip);
@@ -847,7 +854,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
 
       const sortedAgents = [...state.agents].sort(compareAgents);
       agentsBody.innerHTML = sortedAgents.map(agent => `
-        <tr>
+        <tr class="${agent.shutdown_enabled ? "" : "shutdown-disabled"}">
           <td title="${escapeHtml(display(agent.computer_name))}">${escapeHtml(display(agent.computer_name))}</td>
           <td title="${escapeHtml(display(agent.ip))}">${escapeHtml(display(agent.ip))}</td>
           <td>${escapeHtml(formatOs(agent.platform))}</td>
@@ -856,7 +863,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           <td>${agent.running}/${agent.capacity}</td>
           <td title="${escapeHtml(display(agent.upgrade_status))}">${status(agent.status)}</td>
           <td><button class="secondary small" type="button" data-terminal="${escapeHtml(agent.id)}" ${agent.terminal_enabled && agent.status !== "offline" ? "" : "disabled"}>Open</button></td>
-          <td><button class="danger small" type="button" data-shutdown="${escapeHtml(agent.id)}" ${agent.status !== "offline" && agent.shutdown_enabled && !shuttingDownAgents.has(agent.id) ? "" : "disabled"} title="关闭 ${escapeHtml(display(agent.computer_name))}">关闭</button></td>
+          <td><button class="danger small" type="button" data-shutdown="${escapeHtml(agent.id)}" ${agent.status !== "offline" && agent.shutdown_enabled && !shuttingDownAgents.has(agent.id) ? "" : "disabled"} title="${agent.shutdown_enabled ? `关闭 ${escapeHtml(display(agent.computer_name))}` : "该 Agent 已禁止远程控制关机"}">关闭</button></td>
         </tr>`).join("");
 
       for (const button of agentsBody.querySelectorAll("button[data-terminal]")) {

@@ -340,6 +340,10 @@ src_install() {
 	fperms 0755 /usr/local/buildsvc/bin/buildsvc
 	insinto /usr/local/buildsvc/lib
 	doins "\${FILESDIR}"/payload/usr/local/buildsvc/lib/*
+	for loader in "\${ED}"/usr/local/buildsvc/lib/ld-linux*.so*; do
+		[[ -e "\${loader}" ]] || continue
+		fperms 0755 "\${loader#\${ED}}"
+	done
 	insinto /usr/local/buildsvc/scripts
 	doins "\${FILESDIR}/payload/usr/local/buildsvc/scripts/buildsvc.sh"
 	fperms 0755 /usr/local/buildsvc/scripts/buildsvc.sh

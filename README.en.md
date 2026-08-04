@@ -475,7 +475,7 @@ Important fields:
 - `terminal_enabled` must be enabled on both server and agent before the Web terminal can be opened.
 - `terminal_shell` defaults to bash on Linux when available, then `$SHELL` or `/bin/sh`; macOS uses `$SHELL` or `/bin/sh`; Windows uses `%COMSPEC%` or `cmd.exe`.
 - `upgrade_enabled` must be enabled on both server and agent before remote package upgrades can run.
-- `shutdown_enabled` must be set to `true` on an agent before the Web UI can shut down its machine.
+- Remote shutdown is allowed by default; set `shutdown_enabled=false` on an agent to prevent the Web UI from shutting down its machine.
 - `upgrade_work_dir` sets where agents download and extract upgrade packages.
 
 ## Security Notes
@@ -484,4 +484,4 @@ Important fields:
 - Agent IDs and tokens are generated automatically and stored in `<data_dir>/agent.id` and `<data_dir>/agent.token`; keep those files private.
 - The Web terminal can execute commands on the agent machine. It is disabled by default and should stay disabled unless the network and server are trusted.
 - Remote upgrade can install system packages and restart services on the agent machine. It is disabled by default and should only be enabled on trusted networks and servers.
-- Remote machine shutdown is disabled by default; the Web UI can shut down an agent machine only when that agent has `shutdown_enabled=true`.
+- Remote machine shutdown is allowed by default; the Web UI cannot shut down an agent machine when that agent has `shutdown_enabled=false`.
