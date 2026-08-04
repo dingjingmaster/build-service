@@ -36,3 +36,6 @@
 | 15 | 2026-07-09 | L2 | fix | [15-fix-buildsvc-startup-deadlock.md](15-fix-buildsvc-startup-deadlock.md) | 已完成 | 修复 server 启动时 active run 标记 lost 持锁重入导致无端口监听的问题。 |
 | 16 | 2026-08-01 | L2 | fix | [16-fix-buildsvc-child-library-path.md](16-fix-buildsvc-child-library-path.md) | 已完成（待部署） | 修复随包动态库通过 LD_LIBRARY_PATH 污染 bash、systemctl 和构建脚本导致段错误的问题。 |
 | 17 | 2026-08-03 | L3 | research/plan/summary | [17-research-agent-shutdown-permission.md](17-research-agent-shutdown-permission.md)、[17-plan-agent-shutdown-permission.md](17-plan-agent-shutdown-permission.md)、[17-summary-agent-shutdown-permission.md](17-summary-agent-shutdown-permission.md) | 已完成 | 为 agent 增加远程关机权限配置，并在 UI、server API 和 agent 本地双重防护。 |
+| 18 | 2026-08-04 | L1 | summary | [18-summary-agent-shutdown-disabled-ui.md](18-summary-agent-shutdown-disabled-ui.md) | 已完成 | 禁止远程关机的 Agent 在 Agents 列表置顶、淡金色标识且关闭按钮禁用。 |
+| 19 | 2026-08-04 | L2 | fix | [19-fix-gentoo-loader-permission.md](19-fix-gentoo-loader-permission.md) | 已完成 | 修复 Gentoo 包动态加载器权限丢失导致 buildsvc 服务启动重启循环。 |
+| 20 | 2026-08-04 | L2 | task | [20-task-agent-shutdown-default-enabled.md](20-task-agent-shutdown-default-enabled.md) | 已完成 | Agent 远程关机默认允许，显式配置 false 时禁止。 |
