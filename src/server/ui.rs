@@ -195,8 +195,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
       border: 1px solid var(--line);
       border-radius: 5px;
     }
+    .builds-table-scroll,
     .agents-table-scroll {
-      max-height: 268px;
+      max-height: 342px;
       overflow-y: auto;
       overflow-x: hidden;
     }
@@ -442,7 +443,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
                   <button id="deleteBuildsBtn" class="danger" type="button" disabled>Delete Source</button>
                   <span id="selectedBuilds" class="muted"></span>
                 </div>
-                <div class="table-scroll">
+                <div class="table-scroll builds-table-scroll">
                   <table>
                     <thead>
                       <tr>

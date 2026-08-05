@@ -39,3 +39,4 @@
 | 18 | 2026-08-04 | L1 | summary | [18-summary-agent-shutdown-disabled-ui.md](18-summary-agent-shutdown-disabled-ui.md) | 已完成 | 禁止远程关机的 Agent 在 Agents 列表置顶、淡金色标识且关闭按钮禁用。 |
 | 19 | 2026-08-04 | L2 | fix | [19-fix-gentoo-loader-permission.md](19-fix-gentoo-loader-permission.md) | 已完成 | 修复 Gentoo 包动态加载器权限丢失导致 buildsvc 服务启动重启循环。 |
 | 20 | 2026-08-04 | L2 | task | [20-task-agent-shutdown-default-enabled.md](20-task-agent-shutdown-default-enabled.md) | 已完成 | Agent 远程关机默认允许，显式配置 false 时禁止。 |
+| 21 | 2026-08-05 | L1 | summary | [21-summary-builds-agents-table-height.md](21-summary-builds-agents-table-height.md) | 已完成 | Builds 与 Agents 表格统一为 8 条数据行高度，超出后在表格内滚动。 |
