@@ -2,8 +2,8 @@
 
 > 文档元数据
 > - 文档版本：v1.0.0
-> - 最后更新：2026-06-29
-> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md
+> - 最后更新：2026-08-20
+> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md、docs/dev/22-fix-run-log-tail.md
 > - 关联产品文档：docs/overview-product.md
 
 ## 1. 技术栈
@@ -71,7 +71,7 @@
 | `DELETE /api/agents/{name}` | browser | server | offline agent only | 从 server 运行时 agent 列表删除离线 agent |
 | `POST /api/agents/{name}/shutdown` | browser | server | online and `shutdown_enabled` agent only | 通过 agent WebSocket 请求对应机器关机 |
 | `GET /api/runs/{id}/source` | agent | server | agent id/token header | 下载已分配源码包 |
-| `GET /api/runs/{id}/log` | browser | server | text/plain | 读取 run 完整日志 |
+| `GET /api/runs/{id}/log` | browser | server | text/plain | 读取 run 日志尾部最多 5MiB |
 | `DELETE /api/runs/{id}` | browser | server | terminal run only | 请求对应在线 agent 删除工作区，确认后删除 run 记录和日志 |
 | `POST /api/runs/{id}/rerun` | browser | server | finished run only | 为同一 agent/source 新建 run |
 | `POST /api/runs/{id}/cancel` | browser | server | active run | 下发 cancel 或直接标记 canceled |
@@ -187,7 +187,7 @@
 
 - 关键日志：
   - 进程自身日志：stdout/stderr tracing 输出。
-  - run 日志：server data dir 下 `logs/<run_id>.log`。
+  - run 日志：server data dir 下 `logs/<run_id>.log`；文件完整保留，Web/API 默认只读尾部最多 5MiB。
 - 指标/告警：第一版无指标系统。
 - 常见故障：
   - agent invalid token：同名 agent 在当前 server 生命周期内使用了不同 token；可确认 agent 数据目录是否变化，必要时删除离线 agent 或重启 server 让 agent 重新登记。
@@ -213,4 +213,5 @@
 |------|------|------|----------|
 | 2026-06-26 | 创建 Rust MVP 开发概览 | 明确模块、接口、数据、验证和部署边界 | docs/dev/1-*.md |
 | 2026-06-29 | 新增远程关机 API 和 agent 指令 | Agents 表可向在线 agent 下发机器关机请求，增加系统副作用风险项 | docs/dev/14-*.md |
+| 2026-08-20 | Run log 读取改为尾部窗口 | `GET /api/runs/{id}/log` 和 Web UI 可见日志限制为最多 5MiB，日志文件仍完整写入 | docs/dev/22-fix-run-log-tail.md |
 | 2026-08-03 | 增加 agent 远程关机权限配置 | 通过 Hello 能力和 server API 校验控制关机权限，默认关闭 | docs/dev/17-*.md |

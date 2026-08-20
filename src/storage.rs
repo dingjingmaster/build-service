@@ -1,6 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -10,6 +10,8 @@ use anyhow::Context;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::protocol::{ArchiveFormat, BuildView, RunView};
+
+const RUN_LOG_DISPLAY_LIMIT_BYTES: u64 = 5 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct Storage {
@@ -424,10 +426,23 @@ impl Storage {
 
     pub fn read_log(&self, run_id: &str) -> anyhow::Result<String> {
         let path = self.log_path(run_id);
-        match fs::read(&path) {
-            Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        match fs::File::open(&path) {
+            Ok(mut file) => {
+                let len = file
+                    .metadata()
+                    .with_context(|| format!("stat {}", path.display()))?
+                    .len();
+                let start = len.saturating_sub(RUN_LOG_DISPLAY_LIMIT_BYTES);
+                file.seek(SeekFrom::Start(start))
+                    .with_context(|| format!("seek {}", path.display()))?;
+                let mut bytes = Vec::with_capacity((len - start) as usize);
+                file.take(RUN_LOG_DISPLAY_LIMIT_BYTES)
+                    .read_to_end(&mut bytes)
+                    .with_context(|| format!("read {}", path.display()))?;
+                Ok(String::from_utf8_lossy(&bytes).into_owned())
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
-            Err(err) => Err(err).with_context(|| format!("read {}", path.display())),
+            Err(err) => Err(err).with_context(|| format!("open {}", path.display())),
         }
     }
 
@@ -676,6 +691,22 @@ mod tests {
         storage.delete_build("build_1").unwrap();
         assert!(storage.get_build("build_1").unwrap().is_none());
         assert!(!source_dir.exists());
+    }
+
+    #[test]
+    fn read_log_returns_tail_when_file_exceeds_display_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage =
+            Storage::open(dir.path().to_path_buf(), dir.path().join("buildsvc.db")).unwrap();
+        let display_limit = 5 * 1024 * 1024;
+        let mut bytes = vec![b'a'; 32];
+        bytes.extend(std::iter::repeat_n(b'b', display_limit));
+        fs::write(storage.log_path("run_large"), bytes).unwrap();
+
+        let log = storage.read_log("run_large").unwrap();
+
+        assert_eq!(log.len(), display_limit);
+        assert!(log.as_bytes().iter().all(|byte| *byte == b'b'));
     }
 
     #[test]

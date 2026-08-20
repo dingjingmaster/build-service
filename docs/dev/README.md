@@ -40,3 +40,4 @@
 | 19 | 2026-08-04 | L2 | fix | [19-fix-gentoo-loader-permission.md](19-fix-gentoo-loader-permission.md) | 已完成 | 修复 Gentoo 包动态加载器权限丢失导致 buildsvc 服务启动重启循环。 |
 | 20 | 2026-08-04 | L2 | task | [20-task-agent-shutdown-default-enabled.md](20-task-agent-shutdown-default-enabled.md) | 已完成 | Agent 远程关机默认允许，显式配置 false 时禁止。 |
 | 21 | 2026-08-05 | L1 | summary | [21-summary-builds-agents-table-height.md](21-summary-builds-agents-table-height.md) | 已完成 | Builds 与 Agents 表格统一为 8 条数据行高度，超出后在表格内滚动。 |
+| 22 | 2026-08-20 | L2 | fix | [22-fix-run-log-tail.md](22-fix-run-log-tail.md) | 已完成 | Run log 历史读取和实时显示限制为最多 5MiB，避免大日志拖垮 Web 页面。 |

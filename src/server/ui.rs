@@ -594,6 +594,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const selectAllRuns = document.getElementById("selectAllRuns");
     const runSortButtons = Array.from(document.querySelectorAll("button[data-run-sort]"));
     const logEl = document.getElementById("log");
+    const RUN_LOG_DISPLAY_LIMIT = 5 * 1024 * 1024;
     const selectedRunEl = document.getElementById("selectedRun");
     const rerunBtn = document.getElementById("rerunBtn");
     const cancelBtn = document.getElementById("cancelBtn");
@@ -967,12 +968,23 @@ const INDEX_HTML: &str = r#"<!doctype html>
       logEl.textContent = "";
     }
 
+    function setRunLogText(value) {
+      logEl.textContent = value.length > RUN_LOG_DISPLAY_LIMIT
+        ? value.slice(-RUN_LOG_DISPLAY_LIMIT)
+        : value;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function appendRunLogText(value) {
+      if (value === "") return;
+      setRunLogText(logEl.textContent + value);
+    }
+
     async function selectRun(runId) {
       selectedRun = runId;
       render();
       const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/log`);
-      logEl.textContent = await response.text();
-      logEl.scrollTop = logEl.scrollHeight;
+      setRunLogText(await response.text());
     }
 
     uploadForm.addEventListener("submit", async event => {
@@ -1654,8 +1666,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
           state = message.state;
           render();
         } else if (message.type === "log" && message.run_id === selectedRun) {
-          logEl.textContent += message.data;
-          logEl.scrollTop = logEl.scrollHeight;
+          appendRunLogText(message.data);
         } else if (message.type === "upgrade_log") {
           appendUpgradeLog(message);
         }

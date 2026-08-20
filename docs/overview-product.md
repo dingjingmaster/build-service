@@ -2,8 +2,8 @@
 
 > 文档元数据
 > - 文档版本：v1.0.0
-> - 最后更新：2026-06-29
-> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md
+> - 最后更新：2026-08-20
+> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md、docs/dev/22-fix-run-log-tail.md
 
 ## 1. 产品定位
 
@@ -82,7 +82,7 @@
   - 源码包必须是 `tar.gz`、`tgz` 或 `zip`。
   - 压缩包顶层必须只有一个目录。
 - 用户可见行为：
-  - 日志实时追加展示。
+  - 日志实时追加展示；Run Log 页面只显示日志尾部最多 5MiB，server 侧日志文件仍完整保存。
   - agent 选择基于自动生成的内部 ID，UI 不展示该 ID。
   - Agents 列表显示最新计算机名、IP、平台、架构、状态和容量。
   - Agents 列表排序为在线 agent 优先，离线 agent 靠后，同组内按计算机名排序。
@@ -118,4 +118,5 @@
 | 2026-06-26 | 创建 MVP 产品边界 | 明确 server/agent/Web UI/固定脚本执行模型 | docs/dev/1-*.md |
 | 2026-06-29 | Agents 表新增远程关机入口 | 在线 agent 可从 Web UI 直接触发关闭所在机器 | docs/dev/14-*.md |
 | 2026-08-03 | Agent 增加远程关机权限配置 | `[agent].shutdown_enabled` 默认关闭；未授权 agent 的 UI 按钮置灰且 API 拒绝请求 | docs/dev/17-*.md |
+| 2026-08-20 | Run Log 页面限制可见日志大小 | Web UI 只展示 run 日志尾部最多 5MiB，避免大日志拖垮浏览器 | docs/dev/22-fix-run-log-tail.md |
 | 2026-08-04 | 调整 Agent 远程关机默认策略 | `[agent].shutdown_enabled` 默认允许，显式设置为 `false` 时 UI 按钮置灰且 API 拒绝请求 | 本次需求 |
