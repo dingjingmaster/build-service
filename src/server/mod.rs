@@ -347,7 +347,6 @@ async fn upload_build(
             id: ids::run_id(),
             agent_id,
             labels: Vec::new(),
-            script_timeout_sec: state.server.script_timeout_sec,
         })
         .collect();
     state.storage.create_build(
@@ -1422,7 +1421,6 @@ impl AppState {
                 build_id: run.build_id.clone(),
                 source_url,
                 archive_format: run.archive_format,
-                script_timeout_sec: run.script_timeout_sec,
             }) {
                 warn!(agent = %agent.id, run = %run.id, %err, "failed to send run_start");
                 agent.running.remove(&run.id);

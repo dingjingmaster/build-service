@@ -12,6 +12,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::protocol::{ArchiveFormat, BuildView, RunView};
 
 const RUN_LOG_DISPLAY_LIMIT_BYTES: u64 = 5 * 1024 * 1024;
+const LEGACY_SCRIPT_TIMEOUT_SEC: i64 = 0;
 
 #[derive(Clone)]
 pub struct Storage {
@@ -40,7 +41,6 @@ pub struct RunRow {
     pub status: String,
     pub source_path: PathBuf,
     pub archive_format: ArchiveFormat,
-    pub script_timeout_sec: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -48,7 +48,6 @@ pub struct NewRun {
     pub id: String,
     pub agent_id: String,
     pub labels: Vec<String>,
-    pub script_timeout_sec: u64,
 }
 
 impl Storage {
@@ -137,7 +136,7 @@ impl Storage {
                         created_at,
                         source_path.to_string_lossy(),
                         archive_format.to_string(),
-                        run.script_timeout_sec as i64,
+                        LEGACY_SCRIPT_TIMEOUT_SEC,
                     ],
                 )?;
             } else {
@@ -155,7 +154,7 @@ impl Storage {
                         created_at,
                         source_path.to_string_lossy(),
                         archive_format.to_string(),
-                        run.script_timeout_sec as i64,
+                        LEGACY_SCRIPT_TIMEOUT_SEC,
                     ],
                 )?;
             }
@@ -185,7 +184,7 @@ impl Storage {
                     created_at,
                     source.source_path.to_string_lossy(),
                     source.archive_format.to_string(),
-                    source.script_timeout_sec as i64,
+                    LEGACY_SCRIPT_TIMEOUT_SEC,
                     source.id,
                 ],
             )?;
@@ -204,7 +203,7 @@ impl Storage {
                     created_at,
                     source.source_path.to_string_lossy(),
                     source.archive_format.to_string(),
-                    source.script_timeout_sec as i64,
+                    LEGACY_SCRIPT_TIMEOUT_SEC,
                     source.id,
                 ],
             )?;
@@ -270,7 +269,7 @@ impl Storage {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, build_id, agent_id, labels_json, status, exit_code, created_at,
-                    started_at, finished_at, source_path, archive_format, script_timeout_sec
+                    started_at, finished_at, source_path, archive_format
              FROM runs WHERE id = ?1",
         )?;
         stmt.query_row(params![run_id], row_to_run)
@@ -471,7 +470,7 @@ impl Storage {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, build_id, agent_id, labels_json, status, exit_code, created_at,
-                    started_at, finished_at, source_path, archive_format, script_timeout_sec
+                    started_at, finished_at, source_path, archive_format
              FROM runs WHERE status = ?1 ORDER BY created_at ASC",
         )?;
         let rows = stmt.query_map(params![status], row_to_run)?;
@@ -523,7 +522,7 @@ fn init_schema(conn: &Connection) -> anyhow::Result<()> {
             finished_at INTEGER,
             source_path TEXT NOT NULL,
             archive_format TEXT NOT NULL,
-            script_timeout_sec INTEGER NOT NULL,
+            script_timeout_sec INTEGER NOT NULL DEFAULT 0,
             rerun_of TEXT
         );
 
@@ -582,7 +581,6 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRow> {
             "zip" => ArchiveFormat::Zip,
             _ => return Err(rusqlite::Error::InvalidQuery),
         },
-        script_timeout_sec: row.get::<_, i64>(11)? as u64,
     })
 }
 
@@ -663,7 +661,6 @@ mod tests {
                     id: "run_1".to_owned(),
                     agent_id: "agent_1".to_owned(),
                     labels: vec!["linux".to_owned(), "amd64".to_owned()],
-                    script_timeout_sec: 60,
                 }],
             )
             .unwrap();
@@ -730,13 +727,11 @@ mod tests {
                         id: "run_active_1".to_owned(),
                         agent_id: "agent_1".to_owned(),
                         labels: Vec::new(),
-                        script_timeout_sec: 60,
                     },
                     NewRun {
                         id: "run_active_2".to_owned(),
                         agent_id: "agent_2".to_owned(),
                         labels: Vec::new(),
-                        script_timeout_sec: 60,
                     },
                 ],
             )
@@ -781,13 +776,11 @@ mod tests {
                         id: "run_agent_1".to_owned(),
                         agent_id: "agent_1".to_owned(),
                         labels: Vec::new(),
-                        script_timeout_sec: 60,
                     },
                     NewRun {
                         id: "run_agent_2".to_owned(),
                         agent_id: "agent_2".to_owned(),
                         labels: Vec::new(),
-                        script_timeout_sec: 60,
                     },
                 ],
             )
@@ -880,7 +873,6 @@ mod tests {
                     id: "run_new".to_owned(),
                     agent_id: "agent_new".to_owned(),
                     labels: Vec::new(),
-                    script_timeout_sec: 60,
                 }],
             )
             .unwrap();

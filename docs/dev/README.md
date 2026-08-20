@@ -41,3 +41,6 @@
 | 20 | 2026-08-04 | L2 | task | [20-task-agent-shutdown-default-enabled.md](20-task-agent-shutdown-default-enabled.md) | 已完成 | Agent 远程关机默认允许，显式配置 false 时禁止。 |
 | 21 | 2026-08-05 | L1 | summary | [21-summary-builds-agents-table-height.md](21-summary-builds-agents-table-height.md) | 已完成 | Builds 与 Agents 表格统一为 8 条数据行高度，超出后在表格内滚动。 |
 | 22 | 2026-08-20 | L2 | fix | [22-fix-run-log-tail.md](22-fix-run-log-tail.md) | 已完成 | Run log 历史读取和实时显示限制为最多 5MiB，避免大日志拖垮 Web 页面。 |
+| 23 | 2026-08-20 | L3 | research | [23-research-unlimited-script-runtime.md](23-research-unlimited-script-runtime.md) | 已完成 | 调研并界定彻底移除构建脚本运行时长限制的范围。 |
+| 23 | 2026-08-20 | L3 | plan | [23-plan-unlimited-script-runtime.md](23-plan-unlimited-script-runtime.md) | 已完成 | 移除 `script_timeout_sec` 配置、协议字段和 agent 超时终止分支。 |
+| 23 | 2026-08-20 | L3 | summary | [23-summary-unlimited-script-runtime.md](23-summary-unlimited-script-runtime.md) | 已完成 | 取消构建脚本超时限制的实现、验证和风险总结。 |

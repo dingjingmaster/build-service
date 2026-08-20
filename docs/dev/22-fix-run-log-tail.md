@@ -75,4 +75,4 @@
 - 超时归因：`run_676941e4e6e04dfbbdc4fd46a73ba825` 运行 7201 秒，配置 `script_timeout_sec=7200`，退出码 124；日志末尾 `Terminated/Error 143` 与 buildsvc 超时后终止进程组一致。safe_fs x86 脚本没有自身两小时超时逻辑，而是在第 5 个 x86 rootfs `/data/ubuntu20.04-6` 构建期间尚未完成，触发 buildsvc 超时策略。
 - 多角色审视：L2 裁剪项通过；修改范围限定在 Run log 读取/显示、本地任务文档和总文档；未引入依赖、配置或协议变更；完整日志文件未截断。
 - 未提交说明：用户未要求提交，本次未执行 `git add`/`git commit`。
-- 后续建议：如果 x86 全量 rootfs 构建本身需要超过 2 小时，应提高 `[server].script_timeout_sec` 或拆分 x86 rootfs 构建批次；这属于运行策略/构建脚本调整，不在本次代码修改范围内。
+- 后续建议：已由 docs/dev/23-*.md 跟进取消 buildsvc 构建脚本运行时长限制；如 x86 全量 rootfs 构建仍占用过久，可再拆分或优化构建批次。

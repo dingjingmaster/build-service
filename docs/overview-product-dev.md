@@ -3,7 +3,7 @@
 > 文档元数据
 > - 文档版本：v1.0.0
 > - 最后更新：2026-08-20
-> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md、docs/dev/22-fix-run-log-tail.md
+> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md、docs/dev/22-fix-run-log-tail.md、docs/dev/23-*.md
 > - 关联产品文档：docs/overview-product.md
 
 ## 1. 技术栈
@@ -80,7 +80,7 @@
 
 - 核心数据结构：
   - `builds`：build id、source name、archive format、source path、created_at、status。
-  - `runs`：run id、build id、agent id、status、exit_code、timestamps、source path、archive format、timeout。
+  - `runs`：run id、build id、agent id、status、exit_code、timestamps、source path、archive format。
 - 配置文件/参数：
   - 支持 `-c <path>` / `--config <path>` 指定 INI 配置文件。
   - 不指定配置参数时自动发现默认配置。
@@ -92,6 +92,7 @@
   - 项目内本地测试样例：`configs/server.test.ini`、`configs/agent.test.ini`。
   - `server.agent_heartbeat_sec` 默认 5 秒，由 server 在 `hello_accepted` 中下发给 agent。
   - `server.agent_offline_after_sec` 默认 15 秒，超时后 server 将 agent 从在线表移除，Web UI 显示 `offline`。
+  - 构建脚本无运行时长限制；`kill_grace_sec` 仅用于取消 run 或连接断开时终止本地进程组。
   - `server.terminal_enabled` 默认 `false`；关闭时 Web UI 不能打开 agent 终端。
   - `server.upgrade_enabled` 默认 `false`；关闭时 Web UI 不能推送远程包升级。
   - `agent.advertise_ip` 可选；多网卡或非标准网卡名机器建议显式配置。
@@ -214,4 +215,5 @@
 | 2026-06-26 | 创建 Rust MVP 开发概览 | 明确模块、接口、数据、验证和部署边界 | docs/dev/1-*.md |
 | 2026-06-29 | 新增远程关机 API 和 agent 指令 | Agents 表可向在线 agent 下发机器关机请求，增加系统副作用风险项 | docs/dev/14-*.md |
 | 2026-08-20 | Run log 读取改为尾部窗口 | `GET /api/runs/{id}/log` 和 Web UI 可见日志限制为最多 5MiB，日志文件仍完整写入 | docs/dev/22-fix-run-log-tail.md |
+| 2026-08-20 | 移除构建脚本 timeout 配置和协议字段 | `ServerToAgent::RunStart` 不再携带脚本超时，agent 执行脚本只等待自然退出或取消信号 | docs/dev/23-*.md |
 | 2026-08-03 | 增加 agent 远程关机权限配置 | 通过 Hello 能力和 server API 校验控制关机权限，默认关闭 | docs/dev/17-*.md |

@@ -83,7 +83,6 @@ pub enum ServerToAgent {
         build_id: String,
         source_url: String,
         archive_format: ArchiveFormat,
-        script_timeout_sec: u64,
     },
     RunCancel {
         run_id: String,

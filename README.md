@@ -443,7 +443,7 @@ agent 解包后会进入源码根目录执行脚本：
 - Windows：执行 `run-build.bat`。
 - 脚本退出码为 `0` 时 run 标记为成功，非 `0` 时标记为失败。
 - 脚本 stdin 默认关闭；`ssh`、`scp` 等命令应使用密钥和 known_hosts 做非交互配置，避免等待密码或首次连接确认。
-- 脚本成功后 agent 自动删除本次 `<work_dir>/runs/run_*` 工作区；脚本失败、超时或取消时保留现场。
+- 脚本成功后 agent 自动删除本次 `<work_dir>/runs/run_*` 工作区；脚本失败或取消时保留现场。
 - agent 启动时会自动清理 `<work_dir>/runs` 下历史 `run_*` 工作区。
 - 脚本 stdout/stderr 会实时回传到 server，并在 Web UI 的 Run Log 中显示。
 
@@ -469,8 +469,7 @@ agent 解包后会进入源码根目录执行脚本：
 | `log_retention_days` | run 日志保留天数 | `7` |
 | `agent_offline_after_sec` | 多久未收到 agent 心跳后标记离线 | `15` |
 | `agent_heartbeat_sec` | server 下发给 agent 的心跳间隔 | `5` |
-| `script_timeout_sec` | 默认脚本超时时间 | `7200` |
-| `kill_grace_sec` | 取消或超时后优雅终止等待时间 | `10` |
+| `kill_grace_sec` | 取消时优雅终止等待时间 | `10` |
 | `max_upload_size_mb` | 最大上传源码包大小 | `2048` |
 | `terminal_enabled` | 是否允许 Web UI 打开 agent 终端 | `false` |
 | `upgrade_enabled` | 是否允许 Web UI 推送升级包 | `false` |
@@ -486,7 +485,6 @@ server 不需要预置 agent。agent 首次连接时会自动加入运行时列�
 | `work_dir` | agent 工作目录 | `<data_dir>/work` |
 | `concurrency` | agent 本机并发 run 数 | `1` |
 | `heartbeat_sec` | agent 本地心跳间隔；server 接受连接后会以下发值为准 | `5` |
-| `script_timeout_sec` | 脚本超时时间 | `7200` |
 | `kill_grace_sec` | 优雅终止等待时间 | `10` |
 | `terminal_enabled` | 是否允许此 agent 创建 Web 终端会话 | `false` |
 | `terminal_shell` | Web 终端 shell | Linux 优先使用 bash，找不到 bash 时使用 `$SHELL` 或 `/bin/sh`；macOS 使用 `$SHELL` 或 `/bin/sh`；Windows 使用 `%COMSPEC%` 或 `cmd.exe` |

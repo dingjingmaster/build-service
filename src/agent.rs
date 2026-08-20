@@ -497,6 +497,55 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_script_waits_for_process_without_timeout() {
+        let temp = tempfile::tempdir().unwrap();
+        let source_root = temp.path().join("src");
+        std::fs::create_dir_all(&source_root).unwrap();
+        std::fs::write(
+            source_root.join("run-build.sh"),
+            b"#!/bin/sh\nsleep 0.05\nprintf done\\n\n",
+        )
+        .unwrap();
+
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let runtime = AgentRuntime {
+            config: AgentConfig {
+                server_url: "ws://127.0.0.1:10000/api/agent/ws".to_owned(),
+                advertise_ip: None,
+                work_dir: temp.path().join("work"),
+                concurrency: 1,
+                heartbeat_sec: 5,
+                kill_grace_sec: 1,
+                terminal_enabled: false,
+                terminal_shell: None,
+                terminal_work_dir: temp.path().join("terminal"),
+                terminal_max_sessions: 1,
+                upgrade_enabled: false,
+                shutdown_enabled: true,
+                upgrade_work_dir: temp.path().join("upgrades"),
+            },
+            identity: AgentIdentity {
+                id: "agent_test".to_owned(),
+                token: "token_test".to_owned(),
+            },
+            client: Client::new(),
+            sender,
+            runs: Arc::new(Mutex::new(HashMap::new())),
+            terminal_sessions: Arc::new(Mutex::new(HashMap::new())),
+            upgrade: Arc::new(Mutex::new(None)),
+            semaphore: Arc::new(Semaphore::new(1)),
+        };
+        let (_cancel_tx, cancel_rx) = oneshot::channel();
+
+        let exit_code = run_script(runtime, "run_timeout".to_owned(), source_root, cancel_rx)
+            .await
+            .unwrap();
+
+        assert_eq!(exit_code, 0);
+    }
+
     #[test]
     fn validates_upgrade_package_filename() {
         assert!(validate_upgrade_package_filename(UpgradePackageKind::Deb, "buildsvc.deb").is_ok());
@@ -568,22 +617,8 @@ async fn handle_server_message(
             build_id,
             source_url,
             archive_format,
-            script_timeout_sec,
         } => {
-            let effective_timeout = if script_timeout_sec == 0 {
-                runtime.config.script_timeout_sec
-            } else {
-                script_timeout_sec
-            };
-            start_run(
-                runtime,
-                run_id,
-                build_id,
-                source_url,
-                archive_format,
-                effective_timeout,
-            )
-            .await?;
+            start_run(runtime, run_id, build_id, source_url, archive_format).await?;
         }
         ServerToAgent::RunCancel { run_id, reason } => {
             warn!(%run_id, %reason, "cancel requested");
@@ -672,7 +707,6 @@ async fn start_run(
     build_id: String,
     source_url: String,
     archive_format: ArchiveFormat,
-    script_timeout_sec: u64,
 ) -> anyhow::Result<()> {
     let permit = runtime.semaphore.clone().acquire_owned().await?;
     let (cancel_tx, cancel_rx) = oneshot::channel();
@@ -699,7 +733,6 @@ async fn start_run(
             build_id,
             source_url,
             archive_format,
-            script_timeout_sec,
             cancel_rx,
         )
         .await;
@@ -734,7 +767,6 @@ async fn execute_run(
     _build_id: String,
     source_url: String,
     archive_format: ArchiveFormat,
-    script_timeout_sec: u64,
     cancel_rx: oneshot::Receiver<()>,
 ) -> anyhow::Result<()> {
     set_run_state(&runtime, &run_id, "preparing").await;
@@ -767,15 +799,7 @@ async fn execute_run(
         state: "running".to_owned(),
     })?;
 
-    let timeout = Duration::from_secs(script_timeout_sec.max(1));
-    let exit_code = run_script(
-        runtime.clone(),
-        run_id.clone(),
-        source_root,
-        timeout,
-        cancel_rx,
-    )
-    .await?;
+    let exit_code = run_script(runtime.clone(), run_id.clone(), source_root, cancel_rx).await?;
 
     runtime.sender.send(AgentToServer::RunFinished {
         run_id: run_id.clone(),
@@ -812,7 +836,6 @@ async fn run_script(
     runtime: AgentRuntime,
     run_id: String,
     source_root: PathBuf,
-    timeout: Duration,
     mut cancel_rx: oneshot::Receiver<()>,
 ) -> anyhow::Result<i32> {
     prepare_script(&source_root).await?;
@@ -839,8 +862,6 @@ async fn run_script(
         );
     }
 
-    let sleep = time::sleep(timeout);
-    tokio::pin!(sleep);
     tokio::select! {
         status = child.wait() => {
             let status = status?;
@@ -849,10 +870,6 @@ async fn run_script(
         _ = &mut cancel_rx => {
             terminate_child(&mut child, pid, runtime.config.kill_grace_sec).await?;
             Ok(130)
-        }
-        _ = &mut sleep => {
-            terminate_child(&mut child, pid, runtime.config.kill_grace_sec).await?;
-            Ok(124)
         }
     }
 }

@@ -3,7 +3,7 @@
 > 文档元数据
 > - 文档版本：v1.0.0
 > - 最后更新：2026-08-20
-> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md、docs/dev/22-fix-run-log-tail.md
+> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md、docs/dev/22-fix-run-log-tail.md、docs/dev/23-*.md
 
 ## 1. 产品定位
 
@@ -40,7 +40,7 @@
 | 场景 | 用户目标 | 成功标准 | 异常/边界 |
 |------|----------|----------|-----------|
 | 提交构建 | 上传源码包并选择目标 agent | 每个选中 agent 创建一个 run | 未选择目标、包格式不支持、包为空时拒绝 |
-| 执行构建 | agent 运行源码根目录固定脚本 | exit code 0 为 success，非 0 为 failed | 脚本缺失、解包失败或超时为 failed |
+| 执行构建 | agent 运行源码根目录固定脚本 | exit code 0 为 success，非 0 为 failed | 脚本缺失或解包失败为 failed；buildsvc 不限制脚本运行时长 |
 | 查看状态 | server 实时展示 agent 和 run | Web UI 通过 WebSocket 更新；Agents 在线优先，再按计算机名排序 | agent 断线后显示 offline，运行中 run 标记 lost |
 | 重跑任务 | 手动重跑已结束 run | 新建 queued run 并重新调度 | running run 不允许 rerun |
 | 删除 Run | 清理已结束 run 的 agent 工作区和界面记录 | agent 在线并成功删除 `<agent_work_dir>/runs/<run_id>` 后，server 删除 run 记录和日志 | agent 离线、run 未结束或工作区删除失败时拒绝删除 |
@@ -77,6 +77,7 @@
   - 默认心跳间隔为 5 秒，server 默认 15 秒未收到心跳则将 agent 显示为 `offline`。
   - agent 断线后 server 标记该 agent 的 active run 为 `lost`。
   - agent 连接断开后会取消本地运行任务。
+  - buildsvc 不按运行时长终止构建脚本；长时间任务需要用户手动取消或由脚本自行退出。
 - 兼容约束：
   - 支持 Linux、Windows、macOS。
   - 源码包必须是 `tar.gz`、`tgz` 或 `zip`。
@@ -119,4 +120,5 @@
 | 2026-06-29 | Agents 表新增远程关机入口 | 在线 agent 可从 Web UI 直接触发关闭所在机器 | docs/dev/14-*.md |
 | 2026-08-03 | Agent 增加远程关机权限配置 | `[agent].shutdown_enabled` 默认关闭；未授权 agent 的 UI 按钮置灰且 API 拒绝请求 | docs/dev/17-*.md |
 | 2026-08-20 | Run Log 页面限制可见日志大小 | Web UI 只展示 run 日志尾部最多 5MiB，避免大日志拖垮浏览器 | docs/dev/22-fix-run-log-tail.md |
+| 2026-08-20 | 取消构建脚本运行时长限制 | buildsvc 不再配置或下发脚本 timeout，run 只因脚本退出、用户取消或连接断开而结束 | docs/dev/23-*.md |
 | 2026-08-04 | 调整 Agent 远程关机默认策略 | `[agent].shutdown_enabled` 默认允许，显式设置为 `false` 时 UI 按钮置灰且 API 拒绝请求 | 本次需求 |

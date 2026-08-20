@@ -48,7 +48,6 @@ db_path = /var/lib/buildsvc/buildsvc.db
 log_retention_days = 7
 agent_offline_after_sec = 15
 agent_heartbeat_sec = 5
-script_timeout_sec = 7200
 kill_grace_sec = 10
 max_upload_size_mb = 2048
 
@@ -65,7 +64,6 @@ server_url = ws://127.0.0.1:8080/api/agent/ws
 work_dir = /var/lib/buildsvc-agent/work
 concurrency = 2
 heartbeat_sec = 5
-script_timeout_sec = 7200
 kill_grace_sec = 10
 ```
 
@@ -94,13 +92,11 @@ Suggested defaults:
 | `server.log_retention_days` | `7` |
 | `server.agent_offline_after_sec` | `15` |
 | `server.agent_heartbeat_sec` | `5` |
-| `server.script_timeout_sec` | `7200` |
 | `server.kill_grace_sec` | `10` |
 | `server.max_upload_size_mb` | `2048` |
 | `agent.work_dir` | `<core.data_dir>/work` |
 | `agent.concurrency` | `1` |
 | `agent.heartbeat_sec` | `5` |
-| `agent.script_timeout_sec` | `7200` |
 | `agent.kill_grace_sec` | `10` |
 
 ## Supported platforms
@@ -324,8 +320,7 @@ Initial server-to-agent examples:
   "run_id": "run_123",
   "build_id": "build_456",
   "source_url": "http://127.0.0.1:8080/api/runs/run_123/source",
-  "archive_format": "tar.gz",
-  "script_timeout_sec": 7200
+  "archive_format": "tar.gz"
 }
 ```
 
