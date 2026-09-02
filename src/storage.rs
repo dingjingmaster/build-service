@@ -51,10 +51,6 @@ pub struct NewRun {
 }
 
 impl Storage {
-    pub fn open(data_dir: PathBuf, db_path: PathBuf) -> anyhow::Result<Self> {
-        Self::open_with_log_dir(data_dir, db_path, default_log_dir())
-    }
-
     pub fn open_with_log_dir(
         data_dir: PathBuf,
         db_path: PathBuf,
@@ -506,17 +502,6 @@ impl Storage {
     }
 }
 
-fn default_log_dir() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        std::env::temp_dir().join("buildsvc").join("logs")
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        PathBuf::from("/tmp/buildsvc/logs")
-    }
-}
-
 fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
         r#"
@@ -731,18 +716,6 @@ mod tests {
 
         assert_eq!(log.len(), display_limit);
         assert!(log.as_bytes().iter().all(|byte| *byte == b'b'));
-    }
-
-    #[test]
-    fn open_uses_tmp_log_dir_by_default() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage =
-            Storage::open(dir.path().to_path_buf(), dir.path().join("buildsvc.db")).unwrap();
-
-        assert_eq!(
-            storage.log_path("run_tmp"),
-            default_log_dir().join("run_tmp.log")
-        );
     }
 
     #[test]
