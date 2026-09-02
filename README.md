@@ -466,6 +466,7 @@ agent 解包后会进入源码根目录执行脚本：
 | `listen` | HTTP/WebSocket 监听地址 | `0.0.0.0:8080` |
 | `public_url` | agent 下载源码包时访问的 server URL，必须对 agent 可达 | `http://127.0.0.1:8080` |
 | `db_path` | SQLite 数据库路径 | `<data_dir>/buildsvc.db` |
+| `log_dir` | run 日志保存目录 | `/tmp/buildsvc/logs` |
 | `log_retention_days` | run 日志保留天数 | `7` |
 | `agent_offline_after_sec` | 多久未收到 agent 心跳后标记离线 | `15` |
 | `agent_heartbeat_sec` | server 下发给 agent 的心跳间隔 | `5` |

@@ -2,8 +2,8 @@
 
 > 文档元数据
 > - 文档版本：v1.0.0
-> - 最后更新：2026-08-20
-> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md、docs/dev/22-fix-run-log-tail.md、docs/dev/23-*.md
+> - 最后更新：2026-09-02
+> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md、docs/dev/22-fix-run-log-tail.md、docs/dev/23-*.md、docs/dev/24-task-run-log-tmpfs.md
 > - 关联产品文档：docs/overview-product.md
 
 ## 1. 技术栈
@@ -71,7 +71,7 @@
 | `DELETE /api/agents/{name}` | browser | server | offline agent only | 从 server 运行时 agent 列表删除离线 agent |
 | `POST /api/agents/{name}/shutdown` | browser | server | online and `shutdown_enabled` agent only | 通过 agent WebSocket 请求对应机器关机 |
 | `GET /api/runs/{id}/source` | agent | server | agent id/token header | 下载已分配源码包 |
-| `GET /api/runs/{id}/log` | browser | server | text/plain | 读取 run 日志尾部最多 5MiB |
+| `GET /api/runs/{id}/log` | browser | server | text/plain | 读取 run 日志尾部最多 2MiB |
 | `DELETE /api/runs/{id}` | browser | server | terminal run only | 请求对应在线 agent 删除工作区，确认后删除 run 记录和日志 |
 | `POST /api/runs/{id}/rerun` | browser | server | finished run only | 为同一 agent/source 新建 run |
 | `POST /api/runs/{id}/cancel` | browser | server | active run | 下发 cancel 或直接标记 canceled |
@@ -107,12 +107,12 @@
 - 持久化数据：
   - SQLite：`<server_data_dir>/buildsvc.db`。
   - 源码包：`<server_data_dir>/sources/<build_id>/source.*`。
-  - 日志：`<server_data_dir>/logs/<run_id>.log`。
+  - 日志：`<server_log_dir>/<run_id>.log`；默认 `<server_log_dir>` 为 `/tmp/buildsvc/logs`。
   - agent 工作目录：`<agent_work_dir>/runs/<run_id>/...`。
   - server 侧升级包：`<server_data_dir>/upgrades/<upgrade_id>/...`。
   - agent 侧升级包：`<agent_work_dir>/upgrades/<upgrade_id>/...`。
   - 删除 build 时，如果该 build 下无 run 记录，server 删除 `<server_data_dir>/sources/<build_id>` 和 `builds` 表记录。
-  - 删除 run 时，agent 删除 `<agent_work_dir>/runs/<run_id>`，server 删除 `runs` 表记录和 `<server_data_dir>/logs/<run_id>.log`。
+  - 删除 run 时，agent 删除 `<agent_work_dir>/runs/<run_id>`，server 删除 `runs` 表记录和 `<server_log_dir>/<run_id>.log`。
   - terminal session 当前不持久化命令记录和输出日志。
 - Linux 包安装内容：
   - `/usr/local/buildsvc/bin/buildsvc`。
@@ -188,7 +188,7 @@
 
 - 关键日志：
   - 进程自身日志：stdout/stderr tracing 输出。
-  - run 日志：server data dir 下 `logs/<run_id>.log`；文件完整保留，Web/API 默认只读尾部最多 5MiB。
+  - run 日志：`<server_log_dir>/<run_id>.log`，默认位于 `/tmp/buildsvc/logs`；文件完整保留，Web/API 默认只读尾部最多 2MiB。
 - 指标/告警：第一版无指标系统。
 - 常见故障：
   - agent invalid token：同名 agent 在当前 server 生命周期内使用了不同 token；可确认 agent 数据目录是否变化，必要时删除离线 agent 或重启 server 让 agent 重新登记。
@@ -214,6 +214,8 @@
 |------|------|------|----------|
 | 2026-06-26 | 创建 Rust MVP 开发概览 | 明确模块、接口、数据、验证和部署边界 | docs/dev/1-*.md |
 | 2026-06-29 | 新增远程关机 API 和 agent 指令 | Agents 表可向在线 agent 下发机器关机请求，增加系统副作用风险项 | docs/dev/14-*.md |
-| 2026-08-20 | Run log 读取改为尾部窗口 | `GET /api/runs/{id}/log` 和 Web UI 可见日志限制为最多 5MiB，日志文件仍完整写入 | docs/dev/22-fix-run-log-tail.md |
+| 2026-08-20 | Run log 读取改为尾部窗口 | `GET /api/runs/{id}/log` 和 Web UI 只展示尾部窗口，日志文件仍完整写入 | docs/dev/22-fix-run-log-tail.md |
 | 2026-08-20 | 移除构建脚本 timeout 配置和协议字段 | `ServerToAgent::RunStart` 不再携带脚本超时，agent 执行脚本只等待自然退出或取消信号 | docs/dev/23-*.md |
 | 2026-08-03 | 增加 agent 远程关机权限配置 | 通过 Hello 能力和 server API 校验控制关机权限，默认关闭 | docs/dev/17-*.md |
+| 2026-09-02 | Run 日志目录改为可配置 tmpfs 默认 | 新增 `server.log_dir`，默认 `/tmp/buildsvc/logs`；源码包、升级包和 SQLite 仍使用 server data dir | docs/dev/24-task-run-log-tmpfs.md |
+| 2026-09-02 | Run Log 前端改为缓冲节流刷新 | Web UI/API 可见日志窗口降为 2MiB，前端用 buffer 裁剪并通过 animation frame 合并 DOM 刷新 | docs/dev/25-task-run-log-ui-buffer.md |

@@ -594,7 +594,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     const selectAllRuns = document.getElementById("selectAllRuns");
     const runSortButtons = Array.from(document.querySelectorAll("button[data-run-sort]"));
     const logEl = document.getElementById("log");
-    const RUN_LOG_DISPLAY_LIMIT = 5 * 1024 * 1024;
+    const RUN_LOG_DISPLAY_LIMIT = 2 * 1024 * 1024;
+    let runLogBuffer = "";
+    let runLogFlushPending = false;
     const selectedRunEl = document.getElementById("selectedRun");
     const rerunBtn = document.getElementById("rerunBtn");
     const cancelBtn = document.getElementById("cancelBtn");
@@ -965,19 +967,38 @@ const INDEX_HTML: &str = r#"<!doctype html>
     function clearRunSelection() {
       selectedRun = null;
       selectedRuns.clear();
-      logEl.textContent = "";
+      setRunLogText("");
+    }
+
+    function trimRunLogBuffer() {
+      if (runLogBuffer.length > RUN_LOG_DISPLAY_LIMIT) {
+        runLogBuffer = runLogBuffer.slice(-RUN_LOG_DISPLAY_LIMIT);
+      }
+    }
+
+    function flushRunLogText() {
+      runLogFlushPending = false;
+      logEl.textContent = runLogBuffer;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function scheduleRunLogFlush() {
+      if (runLogFlushPending) return;
+      runLogFlushPending = true;
+      requestAnimationFrame(flushRunLogText);
     }
 
     function setRunLogText(value) {
-      logEl.textContent = value.length > RUN_LOG_DISPLAY_LIMIT
-        ? value.slice(-RUN_LOG_DISPLAY_LIMIT)
-        : value;
-      logEl.scrollTop = logEl.scrollHeight;
+      runLogBuffer = value;
+      trimRunLogBuffer();
+      scheduleRunLogFlush();
     }
 
     function appendRunLogText(value) {
       if (value === "") return;
-      setRunLogText(logEl.textContent + value);
+      runLogBuffer += value;
+      trimRunLogBuffer();
+      scheduleRunLogFlush();
     }
 
     async function selectRun(runId) {
@@ -1678,3 +1699,19 @@ const INDEX_HTML: &str = r#"<!doctype html>
 </body>
 </html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_log_ui_uses_buffered_throttled_two_mib_window() {
+        assert!(INDEX_HTML.contains("const RUN_LOG_DISPLAY_LIMIT = 2 * 1024 * 1024;"));
+        assert!(INDEX_HTML.contains("let runLogBuffer = \"\";"));
+        assert!(INDEX_HTML.contains("let runLogFlushPending = false;"));
+        assert!(INDEX_HTML.contains("function scheduleRunLogFlush()"));
+        assert!(INDEX_HTML.contains("requestAnimationFrame"));
+        assert!(INDEX_HTML.contains("function trimRunLogBuffer()"));
+        assert!(!INDEX_HTML.contains("logEl.textContent + value"));
+    }
+}

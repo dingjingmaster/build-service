@@ -11,7 +11,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::protocol::{ArchiveFormat, BuildView, RunView};
 
-const RUN_LOG_DISPLAY_LIMIT_BYTES: u64 = 5 * 1024 * 1024;
+const RUN_LOG_DISPLAY_LIMIT_BYTES: u64 = 2 * 1024 * 1024;
 const LEGACY_SCRIPT_TIMEOUT_SEC: i64 = 0;
 
 #[derive(Clone)]
@@ -52,8 +52,16 @@ pub struct NewRun {
 
 impl Storage {
     pub fn open(data_dir: PathBuf, db_path: PathBuf) -> anyhow::Result<Self> {
+        Self::open_with_log_dir(data_dir, db_path, default_log_dir())
+    }
+
+    pub fn open_with_log_dir(
+        data_dir: PathBuf,
+        db_path: PathBuf,
+        log_dir: PathBuf,
+    ) -> anyhow::Result<Self> {
         let sources_dir = data_dir.join("sources");
-        let logs_dir = data_dir.join("logs");
+        let logs_dir = log_dir;
         let upgrades_dir = data_dir.join("upgrades");
         let tmp_dir = data_dir.join("tmp");
         fs::create_dir_all(&sources_dir)
@@ -498,6 +506,17 @@ impl Storage {
     }
 }
 
+fn default_log_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        std::env::temp_dir().join("buildsvc").join("logs")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        PathBuf::from("/tmp/buildsvc/logs")
+    }
+}
+
 fn init_schema(conn: &Connection) -> anyhow::Result<()> {
     conn.execute_batch(
         r#"
@@ -644,8 +663,12 @@ mod tests {
     #[test]
     fn stores_build_runs_reruns_and_logs() {
         let dir = tempfile::tempdir().unwrap();
-        let storage =
-            Storage::open(dir.path().to_path_buf(), dir.path().join("buildsvc.db")).unwrap();
+        let storage = Storage::open_with_log_dir(
+            dir.path().to_path_buf(),
+            dir.path().join("buildsvc.db"),
+            dir.path().join("logs"),
+        )
+        .unwrap();
         let source_dir = storage.sources_dir().join("build_1");
         fs::create_dir_all(&source_dir).unwrap();
         let source = source_dir.join("source.tar.gz");
@@ -693,9 +716,13 @@ mod tests {
     #[test]
     fn read_log_returns_tail_when_file_exceeds_display_limit() {
         let dir = tempfile::tempdir().unwrap();
-        let storage =
-            Storage::open(dir.path().to_path_buf(), dir.path().join("buildsvc.db")).unwrap();
-        let display_limit = 5 * 1024 * 1024;
+        let storage = Storage::open_with_log_dir(
+            dir.path().to_path_buf(),
+            dir.path().join("buildsvc.db"),
+            dir.path().join("logs"),
+        )
+        .unwrap();
+        let display_limit = 2 * 1024 * 1024;
         let mut bytes = vec![b'a'; 32];
         bytes.extend(std::iter::repeat_n(b'b', display_limit));
         fs::write(storage.log_path("run_large"), bytes).unwrap();
@@ -707,10 +734,26 @@ mod tests {
     }
 
     #[test]
-    fn marks_active_runs_lost_without_deadlock() {
+    fn open_uses_tmp_log_dir_by_default() {
         let dir = tempfile::tempdir().unwrap();
         let storage =
             Storage::open(dir.path().to_path_buf(), dir.path().join("buildsvc.db")).unwrap();
+
+        assert_eq!(
+            storage.log_path("run_tmp"),
+            default_log_dir().join("run_tmp.log")
+        );
+    }
+
+    #[test]
+    fn marks_active_runs_lost_without_deadlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open_with_log_dir(
+            dir.path().to_path_buf(),
+            dir.path().join("buildsvc.db"),
+            dir.path().join("logs"),
+        )
+        .unwrap();
         let source_dir = storage.sources_dir().join("build_active");
         fs::create_dir_all(&source_dir).unwrap();
         let source = source_dir.join("source.tar.gz");
@@ -758,8 +801,12 @@ mod tests {
     #[test]
     fn marks_agent_runs_lost_without_deadlock() {
         let dir = tempfile::tempdir().unwrap();
-        let storage =
-            Storage::open(dir.path().to_path_buf(), dir.path().join("buildsvc.db")).unwrap();
+        let storage = Storage::open_with_log_dir(
+            dir.path().to_path_buf(),
+            dir.path().join("buildsvc.db"),
+            dir.path().join("logs"),
+        )
+        .unwrap();
         let source_dir = storage.sources_dir().join("build_agent_active");
         fs::create_dir_all(&source_dir).unwrap();
         let source = source_dir.join("source.tar.gz");
@@ -855,7 +902,9 @@ mod tests {
             .unwrap();
         }
 
-        let storage = Storage::open(dir.path().to_path_buf(), db_path).unwrap();
+        let storage =
+            Storage::open_with_log_dir(dir.path().to_path_buf(), db_path, dir.path().join("logs"))
+                .unwrap();
         let run = storage.get_run("run_old").unwrap().unwrap();
         assert_eq!(run.agent_id, "old-agent");
 

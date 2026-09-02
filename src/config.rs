@@ -45,6 +45,7 @@ pub struct ServerConfig {
     pub listen: String,
     pub public_url: String,
     pub db_path: PathBuf,
+    pub log_dir: PathBuf,
     pub log_retention_days: u64,
     pub agent_offline_after_sec: u64,
     pub agent_heartbeat_sec: u64,
@@ -170,6 +171,17 @@ fn default_data_dir() -> String {
     }
 }
 
+fn default_server_log_dir() -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        env::temp_dir().join("buildsvc").join("logs")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        PathBuf::from("/tmp/buildsvc/logs")
+    }
+}
+
 fn parse_server_config(
     core: &CoreConfig,
     section: &BTreeMap<String, String>,
@@ -177,6 +189,9 @@ fn parse_server_config(
     let db_path = optional(section, "db_path")
         .map(PathBuf::from)
         .unwrap_or_else(|| core.data_dir.join("buildsvc.db"));
+    let log_dir = optional(section, "log_dir")
+        .map(PathBuf::from)
+        .unwrap_or_else(default_server_log_dir);
 
     Ok(ServerConfig {
         listen: optional(section, "listen")
@@ -187,6 +202,7 @@ fn parse_server_config(
             .trim_end_matches('/')
             .to_owned(),
         db_path,
+        log_dir,
         log_retention_days: parse_u64(section, "log_retention_days", 7)?,
         agent_offline_after_sec: parse_u64(section, "agent_offline_after_sec", 15)?,
         agent_heartbeat_sec: parse_u64(section, "agent_heartbeat_sec", 5)?,
@@ -365,7 +381,30 @@ mod tests {
         assert_eq!(config.core.data_dir, PathBuf::from("./data"));
         let server = config.server.unwrap();
         assert_eq!(server.listen, "127.0.0.1:9090");
+        assert_eq!(server.log_dir, default_server_log_dir());
         assert!(!server.upgrade_enabled);
+    }
+
+    #[test]
+    fn parses_explicit_server_log_dir() {
+        let config = AppConfig::from_ini_str(
+            r#"
+            [core]
+            role = server
+            data_dir = /var/lib/buildsvc
+
+            [server]
+            log_dir = /tmp/custom-buildsvc-logs
+            "#,
+        )
+        .unwrap();
+
+        let server = config.server.unwrap();
+        assert_eq!(server.log_dir, PathBuf::from("/tmp/custom-buildsvc-logs"));
+        assert_eq!(
+            server.db_path,
+            PathBuf::from("/var/lib/buildsvc/buildsvc.db")
+        );
     }
 
     #[test]

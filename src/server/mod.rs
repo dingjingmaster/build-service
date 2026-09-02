@@ -154,7 +154,11 @@ enum TerminalBrowserMessage {
 }
 
 pub async fn run(core: CoreConfig, server: ServerConfig) -> anyhow::Result<()> {
-    let storage = Storage::open(core.data_dir.clone(), server.db_path.clone())?;
+    let storage = Storage::open_with_log_dir(
+        core.data_dir.clone(),
+        server.db_path.clone(),
+        server.log_dir.clone(),
+    )?;
     let lost_on_start = storage.mark_active_runs_lost()?;
     if !lost_on_start.is_empty() {
         warn!(
