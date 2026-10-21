@@ -2,8 +2,8 @@
 
 > 文档元数据
 > - 文档版本：v1.0.0
-> - 最后更新：2026-09-02
-> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md、docs/dev/22-fix-run-log-tail.md、docs/dev/23-*.md、docs/dev/24-task-run-log-tmpfs.md
+> - 最后更新：2026-10-21
+> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md、docs/dev/22-fix-run-log-tail.md、docs/dev/23-*.md、docs/dev/24-task-run-log-tmpfs.md、docs/dev/26-summary-agent-reconnect.md
 
 ## 1. 产品定位
 
@@ -20,6 +20,7 @@
   - server 提供 Web UI，上传 `tar.gz`/`zip` 源码包。
   - 用户按 Agents 列表中的机器信息选择目标 agent。
   - agent 通过 WebSocket 连接 server，启动时自动上报最新计算机名，接收 run，下载源码包，解包并执行固定脚本。
+  - agent 持续维护连接；server 暂时不可用或重启后自动重试注册，无需手动重启 agent。断线时取消当前任务并关闭终端，重连不恢复旧任务。
   - server 实时显示 agent 状态、run 状态、日志和退出码。
   - server 支持删除 offline agent。
   - failed/lost/canceled/success run 可手动 rerun。

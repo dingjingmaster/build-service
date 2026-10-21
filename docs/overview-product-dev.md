@@ -2,8 +2,8 @@
 
 > 文档元数据
 > - 文档版本：v1.0.0
-> - 最后更新：2026-09-02
-> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md、docs/dev/22-fix-run-log-tail.md、docs/dev/23-*.md、docs/dev/24-task-run-log-tmpfs.md
+> - 最后更新：2026-10-21
+> - 更新来源：docs/dev/1-*.md、docs/dev/14-*.md、docs/dev/22-fix-run-log-tail.md、docs/dev/23-*.md、docs/dev/24-task-run-log-tmpfs.md、docs/dev/26-summary-agent-reconnect.md
 > - 关联产品文档：docs/overview-product.md
 
 ## 1. 技术栈
@@ -37,6 +37,8 @@
 - 客户端/服务端边界：
   - Browser 只连接 server。
   - Agent 主动连接 server，不由 server SSH 推送。
+  - Agent 的连接建立（含 WebSocket 握手）、HelloAccepted 等待及单次写入各有 10 秒超时；注册后每 5 秒用标准 Ping/Pong 探活，每次等待匹配 Pong 最多 15 秒。现有 server 的 axum 自动回复 Pong，业务 JSON 协议不变。
+  - Agent 读、写、探活任一路结束都会释放本轮连接，并停止心跳、关闭终端、发送任务取消信号。已注册连接断开后立即重试；连接或注册失败后每 3 秒持续重试，无次数上限。相关验证见 [agent 重连总结](dev/26-summary-agent-reconnect.md)。
 - 数据流：
   - Browser 上传源码包到 server。
   - Agent 通过 HTTP 下载源码包。

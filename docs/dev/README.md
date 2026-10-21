@@ -46,3 +46,4 @@
 | 23 | 2026-08-20 | L3 | summary | [23-summary-unlimited-script-runtime.md](23-summary-unlimited-script-runtime.md) | 已完成 | 取消构建脚本超时限制的实现、验证和风险总结。 |
 | 24 | 2026-09-02 | L2 | task | [24-task-run-log-tmpfs.md](24-task-run-log-tmpfs.md) | 已完成 | 将 server run 日志默认写入 `/tmp/buildsvc/logs`，避免大量编译输出持续写固态硬盘。 |
 | 25 | 2026-09-02 | L2 | task | [25-task-run-log-ui-buffer.md](25-task-run-log-ui-buffer.md) | 已完成 | 将 Web Run Log 改为前端 buffer 分片裁剪和节流刷新，并把 Web/API 可见上限降到 2MiB。 |
+| 26 | 2026-10-21 | L3 | research/plan/summary | [26-research-agent-reconnect.md](26-research-agent-reconnect.md)、[26-plan-agent-reconnect.md](26-plan-agent-reconnect.md)、[26-summary-agent-reconnect.md](26-summary-agent-reconnect.md) | 已完成（未部署） | 仅 agent 侧增加连接超时、Ping/Pong 探活、持续重试及统一断线清理；40 项测试通过。 |

@@ -22,7 +22,7 @@ use tokio::{
     fs,
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::{Child, Command},
-    sync::{Mutex, Semaphore, mpsc, oneshot},
+    sync::{Mutex, Semaphore, mpsc, oneshot, watch},
     time,
 };
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -76,6 +76,11 @@ enum UpgradeOutcome {
     Deferred,
 }
 
+const CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
+const PING_INTERVAL: Duration = Duration::from_secs(5);
+const PONG_TIMEOUT: Duration = Duration::from_secs(15);
+const RECONNECT_DELAY: Duration = Duration::from_secs(3);
+
 pub async fn run(core: CoreConfig, config: AgentConfig) -> anyhow::Result<()> {
     fs::create_dir_all(&core.data_dir)
         .await
@@ -113,17 +118,31 @@ pub async fn run(core: CoreConfig, config: AgentConfig) -> anyhow::Result<()> {
     fs::create_dir_all(core.data_dir.join("tmp")).await.ok();
 
     loop {
-        match run_once(config.clone(), identity.clone()).await {
+        let mut registered = false;
+        match run_once(config.clone(), identity.clone(), &mut registered).await {
             Ok(()) => warn!("agent websocket closed"),
             Err(err) => warn!(%err, "agent websocket error"),
         }
-        time::sleep(Duration::from_secs(3)).await;
+        if registered {
+            info!("agent disconnected; reconnecting immediately");
+        } else {
+            warn!(
+                retry_sec = RECONNECT_DELAY.as_secs(),
+                "agent connection failed; retrying"
+            );
+            time::sleep(RECONNECT_DELAY).await;
+        }
     }
 }
 
-async fn run_once(config: AgentConfig, identity: AgentIdentity) -> anyhow::Result<()> {
-    let (ws, _) = connect_async(&config.server_url)
+async fn run_once(
+    config: AgentConfig,
+    identity: AgentIdentity,
+    registered: &mut bool,
+) -> anyhow::Result<()> {
+    let (ws, _) = time::timeout(CONNECTION_TIMEOUT, connect_async(&config.server_url))
         .await
+        .context("agent connection timed out")?
         .with_context(|| format!("connect {}", config.server_url))?;
     let (mut ws_tx, mut ws_rx) = ws.split();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<AgentToServer>();
@@ -153,63 +172,128 @@ async fn run_once(config: AgentConfig, identity: AgentIdentity) -> anyhow::Resul
         version: env!("CARGO_PKG_VERSION").to_owned(),
     })?;
 
-    let writer = tokio::spawn(async move {
-        while let Some(message) = out_rx.recv().await {
-            let Ok(text) = serde_json::to_string(&message) else {
-                continue;
-            };
-            if ws_tx.send(Message::Text(text.into())).await.is_err() {
-                break;
-            }
-        }
-    });
-
+    let (control_tx, mut control_rx) = mpsc::unbounded_channel::<Message>();
+    let (command_tx, mut command_rx) = mpsc::unbounded_channel::<ServerToAgent>();
+    let (pong_tx, mut pong_rx) = watch::channel(Vec::<u8>::new());
+    let pending_ping = AtomicU64::new(0);
+    let (hello_tx, hello_rx) = oneshot::channel();
     let mut heartbeat = None;
 
-    while let Some(message) = ws_rx.next().await {
-        let message = message?;
-        match message {
-            Message::Text(text) => {
-                let server_message: ServerToAgent = serde_json::from_str(&text)?;
-                match server_message {
-                    ServerToAgent::HelloAccepted { heartbeat_sec } => {
-                        let heartbeat_sec = if heartbeat_sec == 0 {
-                            runtime.config.heartbeat_sec
-                        } else {
-                            heartbeat_sec
-                        };
-                        info!(heartbeat_sec, "agent connected");
-                        if heartbeat.is_none() {
-                            let heartbeat_runtime = runtime.clone();
-                            heartbeat = Some(tokio::spawn(async move {
-                                heartbeat_loop(heartbeat_runtime, heartbeat_sec.max(1)).await;
-                            }));
+    // Keep all connection futures in this scope: any failure drops the others
+    // before cleanup, including errors which used to bypass the cleanup below.
+    let result = {
+        let writer = async {
+            loop {
+                let message = tokio::select! {
+                    biased;
+                    Some(message) = control_rx.recv() => message,
+                    Some(message) = out_rx.recv() => {
+                        Message::Text(serde_json::to_string(&message)?.into())
+                    }
+                    else => bail!("agent outgoing channels closed"),
+                };
+                time::timeout(CONNECTION_TIMEOUT, ws_tx.send(message))
+                    .await
+                    .context("agent websocket send timed out")??;
+            }
+        };
+        let reader = async {
+            let mut hello_tx = Some(hello_tx);
+            while let Some(message) = ws_rx.next().await {
+                match message? {
+                    Message::Text(text) => {
+                        let server_message: ServerToAgent = serde_json::from_str(&text)?;
+                        match server_message {
+                            ServerToAgent::HelloAccepted { heartbeat_sec } => {
+                                let heartbeat_sec = if heartbeat_sec == 0 {
+                                    runtime.config.heartbeat_sec
+                                } else {
+                                    heartbeat_sec
+                                };
+                                if let Some(hello_tx) = hello_tx.take() {
+                                    *registered = true;
+                                    let _ = hello_tx.send(());
+                                    info!(heartbeat_sec, "agent connected");
+                                    let heartbeat_runtime = runtime.clone();
+                                    heartbeat = Some(tokio::spawn(async move {
+                                        heartbeat_loop(heartbeat_runtime, heartbeat_sec.max(1))
+                                            .await;
+                                    }));
+                                }
+                            }
+                            message => command_tx.send(message)?,
                         }
                     }
-                    message => handle_server_message(runtime.clone(), message).await?,
+                    Message::Pong(data) => {
+                        // Unsolicited/stale Pong frames must not overwrite a
+                        // matching acknowledgement before the watchdog reads it.
+                        if data.as_ref() == pending_ping.load(Ordering::Relaxed).to_be_bytes() {
+                            let _ = pong_tx.send(data.to_vec());
+                        }
+                    }
+                    Message::Close(frame) => {
+                        if let Some(frame) = frame {
+                            warn!(code = ?frame.code, reason = %frame.reason,
+                                "agent websocket closed by server");
+                        }
+                        break;
+                    }
+                    _ => {}
                 }
             }
-            Message::Close(frame) => {
-                if let Some(frame) = frame {
-                    warn!(
-                        code = ?frame.code,
-                        reason = %frame.reason,
-                        "agent websocket closed by server"
-                    );
-                }
-                break;
+            Ok::<(), anyhow::Error>(())
+        };
+        // Preserve command ordering without blocking Pong reads on slow work
+        // such as waiting for a run permit or deleting a workspace.
+        let commands = async {
+            while let Some(message) = command_rx.recv().await {
+                handle_server_message(runtime.clone(), message).await?;
             }
-            _ => {}
+            Ok::<(), anyhow::Error>(())
+        };
+        let watchdog = async {
+            time::timeout(CONNECTION_TIMEOUT, hello_rx)
+                .await
+                .context("agent hello acknowledgement timed out")??;
+            let mut interval = time::interval(PING_INTERVAL);
+            interval.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+            let mut sequence = 0u64;
+            loop {
+                interval.tick().await;
+                sequence = sequence.wrapping_add(1);
+                pending_ping.store(sequence, Ordering::Relaxed);
+                let payload = sequence.to_be_bytes().to_vec();
+                control_tx.send(Message::Ping(payload.clone().into()))?;
+                time::timeout(PONG_TIMEOUT, async {
+                    loop {
+                        if *pong_rx.borrow_and_update() == payload {
+                            return Ok::<(), anyhow::Error>(());
+                        }
+                        pong_rx.changed().await?;
+                    }
+                })
+                .await
+                .context("agent pong timed out")??;
+            }
+        };
+        tokio::select! {
+            result = reader => result,
+            result = writer => result,
+            result = watchdog => result,
+            result = commands => result,
         }
-    }
+    };
 
     if let Some(heartbeat) = heartbeat {
         heartbeat.abort();
+        let _ = heartbeat.await;
     }
-    writer.abort();
+    // Drop both socket halves before re-registering with the same identity.
+    drop(ws_tx);
+    drop(ws_rx);
     close_all_terminals(runtime.clone()).await;
     cancel_all(runtime).await;
-    Ok(())
+    result
 }
 
 async fn load_or_create_agent_identity(data_dir: &Path) -> anyhow::Result<AgentIdentity> {
@@ -400,6 +484,365 @@ fn physical_interface_score(name: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn connection_config(root: &Path, address: std::net::SocketAddr) -> (CoreConfig, AgentConfig) {
+        let config = crate::config::AppConfig::from_ini_str(&format!(
+            "[core]\nrole=agent\ndata_dir={}\n[agent]\nserver_url=ws://{address}/api/agent/ws\nwork_dir={}\nterminal_enabled=false\nupgrade_enabled=false\n",
+            root.join("data").display(), root.join("work").display()
+        )).unwrap();
+        (config.core, config.agent.unwrap())
+    }
+
+    fn spawn_connection(config: AgentConfig) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+        tokio::spawn(async move {
+            run_once(
+                config,
+                AgentIdentity {
+                    id: "agent_test".into(),
+                    token: "token_test".into(),
+                },
+                &mut false,
+            )
+            .await
+        })
+    }
+
+    #[tokio::test]
+    async fn connection_probe_keeps_matching_pong_before_unrelated_pong() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let (_, config) = connection_config(temp.path(), listener.local_addr().unwrap());
+        let client = spawn_connection(config);
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            serde_json::to_string(&ServerToAgent::HelloAccepted { heartbeat_sec: 1 })
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        let payload = time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Message::Ping(data) = ws.next().await.unwrap().unwrap() {
+                    break data;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        // Put both Pong frames in one TCP write so the reader sees them together.
+        let mut frames = vec![0x8a, payload.len() as u8];
+        frames.extend_from_slice(&payload);
+        frames.extend_from_slice(&[0x8a, 1, 0]);
+        ws.get_mut().write_all(&frames).await.unwrap();
+        // Replace tungstenite's queued automatic Pong with another unrelated one.
+        ws.send(Message::Pong(vec![0].into())).await.unwrap();
+        time::timeout(Duration::from_secs(7), async {
+            loop {
+                if let Message::Ping(next) = ws.next().await.unwrap().unwrap() {
+                    assert_ne!(next, payload);
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("matching Pong was overwritten; next probe never sent");
+        ws.close(None).await.unwrap();
+        time::timeout(Duration::from_secs(2), client)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn connection_times_out_during_websocket_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let (_, config) = connection_config(temp.path(), listener.local_addr().unwrap());
+        let client = spawn_connection(config);
+        let (_stream, _) = listener.accept().await.unwrap();
+        let result = time::timeout(Duration::from_secs(12), client)
+            .await
+            .expect("WebSocket handshake did not time out")
+            .unwrap();
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("connection timed out")
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_recovers_when_server_starts_later_and_restarts() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let temp = tempfile::tempdir().unwrap();
+        let (core, config) = connection_config(temp.path(), address);
+        let agent = tokio::spawn(run(core, config));
+        let mut first_hello = None;
+        for _ in 0..3 {
+            // Leave the port closed across more than one retry, then restore it.
+            time::sleep(Duration::from_secs(4)).await;
+            assert!(
+                !agent.is_finished(),
+                "agent exited while server was unavailable"
+            );
+            let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+            let (stream, _) = time::timeout(Duration::from_secs(5), listener.accept())
+                .await
+                .expect("agent did not reconnect after server recovery")
+                .unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let Message::Text(hello) = ws.next().await.unwrap().unwrap() else {
+                panic!("missing hello")
+            };
+            let hello: serde_json::Value = serde_json::from_str(&hello).unwrap();
+            assert_eq!(hello["type"], "hello");
+            if let Some(first) = &first_hello {
+                assert_eq!(first, &hello, "agent identity changed during reconnect");
+            } else {
+                first_hello = Some(hello);
+            }
+            ws.send(Message::Text(
+                serde_json::to_string(&ServerToAgent::HelloAccepted { heartbeat_sec: 1 })
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            // Abrupt loss, without a WebSocket Close frame, like a killed server.
+            drop(listener);
+            drop(ws);
+        }
+        agent.abort();
+        let _ = agent.await;
+    }
+
+    #[tokio::test]
+    async fn connection_cleans_up_socket_after_invalid_message() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let (_, config) = connection_config(temp.path(), listener.local_addr().unwrap());
+        let client = spawn_connection(config);
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            serde_json::to_string(&ServerToAgent::HelloAccepted { heartbeat_sec: 1 })
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        ws.send(Message::Text("invalid json".into())).await.unwrap();
+        assert!(
+            time::timeout(Duration::from_secs(2), client)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        time::timeout(Duration::from_secs(2), async {
+            while let Some(Ok(message)) = ws.next().await {
+                if matches!(message, Message::Close(_)) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("old connection/heartbeat leaked after parse error");
+    }
+
+    #[tokio::test]
+    async fn connection_stays_healthy_with_axum_automatic_pong() {
+        assert_healthy_connection(false).await;
+    }
+
+    #[tokio::test]
+    async fn connection_probe_survives_busy_run_handler() {
+        assert_healthy_connection(true).await;
+    }
+
+    async fn assert_healthy_connection(busy: bool) {
+        use axum::{Router, extract::ws::WebSocketUpgrade, routing::get};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let download_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let download_address = download_listener.local_addr().unwrap();
+        let pings = Arc::new(AtomicU64::new(0));
+        let observed = pings.clone();
+        let app = Router::new().route("/api/agent/ws", get(move |upgrade: WebSocketUpgrade| {
+            let pings = observed.clone();
+            async move { upgrade.on_upgrade(move |mut ws| async move {
+                use axum::extract::ws::Message as ServerMessage;
+                ws.recv().await.unwrap().unwrap();
+                ws.send(ServerMessage::Text(serde_json::to_string(&ServerToAgent::HelloAccepted {
+                    heartbeat_sec: 1,
+                }).unwrap().into())).await.unwrap();
+                if busy {
+                    for index in 0..2 {
+                        ws.send(ServerMessage::Text(serde_json::to_string(&ServerToAgent::RunStart {
+                            run_id: format!("run_busy_{index}"),
+                            build_id: "build_busy".into(),
+                            source_url: format!("http://{download_address}/source"),
+                            archive_format: ArchiveFormat::TarGz,
+                        }).unwrap().into())).await.unwrap();
+                    }
+                }
+                let deadline = time::sleep(Duration::from_secs(18));
+                tokio::pin!(deadline);
+                loop {
+                    tokio::select! {
+                        _ = &mut deadline => { ws.send(ServerMessage::Close(None)).await.unwrap(); break; }
+                        message = ws.recv() => match message {
+                            Some(Ok(ServerMessage::Ping(_))) => { pings.fetch_add(1, Ordering::Relaxed); }
+                            Some(Ok(_)) => {}
+                            _ => break,
+                        }
+                    }
+                }
+            }) }
+        }));
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let (_, config) = connection_config(temp.path(), address);
+        let client = spawn_connection(config);
+        // The first download occupies the only permit; the second RunStart waits.
+        let _download = if busy {
+            Some(
+                time::timeout(Duration::from_secs(2), download_listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        time::sleep(Duration::from_secs(17)).await;
+        assert!(
+            !client.is_finished(),
+            "healthy idle connection was disconnected"
+        );
+        assert!(
+            pings.load(Ordering::Relaxed) >= 3,
+            "agent did not periodically probe server"
+        );
+        time::timeout(Duration::from_secs(3), client)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        server.abort();
+        let _ = server.await;
+    }
+
+    // A connected but silent peer must not keep the agent stuck forever.
+    #[tokio::test]
+    async fn connection_times_out_without_hello_ack() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let (_, config) = connection_config(temp.path(), listener.local_addr().unwrap());
+        let client = tokio::spawn(async move {
+            run_once(
+                config,
+                AgentIdentity {
+                    id: "agent_test".into(),
+                    token: "token_test".into(),
+                },
+                &mut false,
+            )
+            .await
+        });
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        assert!(matches!(
+            ws.next().await.unwrap().unwrap(),
+            Message::Text(_)
+        ));
+        let result = time::timeout(Duration::from_secs(12), client).await;
+        assert!(
+            result.is_ok(),
+            "agent stayed connected without HelloAccepted"
+        );
+        assert!(result.unwrap().unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn connection_times_out_without_pong() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let (_, config) = connection_config(temp.path(), listener.local_addr().unwrap());
+        let client = tokio::spawn(async move {
+            run_once(
+                config,
+                AgentIdentity {
+                    id: "agent_test".into(),
+                    token: "token_test".into(),
+                },
+                &mut false,
+            )
+            .await
+        });
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        ws.next().await.unwrap().unwrap();
+        ws.send(Message::Text(
+            serde_json::to_string(&ServerToAgent::HelloAccepted { heartbeat_sec: 1 })
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        // Do not poll the socket: tungstenite would otherwise automatically answer Ping.
+        let result = time::timeout(Duration::from_secs(22), client).await;
+        assert!(result.is_ok(), "agent stayed connected without Pong");
+        assert!(result.unwrap().unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn connection_reconnects_immediately_after_close() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let (core, config) = connection_config(temp.path(), listener.local_addr().unwrap());
+        let agent = tokio::spawn(run(core, config));
+        let mut first_id = None;
+        for _ in 0..3 {
+            let (stream, _) = time::timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .expect("agent did not reconnect promptly")
+                .unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let Message::Text(hello) = ws.next().await.unwrap().unwrap() else {
+                panic!("missing hello")
+            };
+            let AgentToServer::Hello { agent_id, .. } = serde_json::from_str(&hello).unwrap()
+            else {
+                panic!("missing hello")
+            };
+            if let Some(id) = &first_id {
+                assert_eq!(id, &agent_id);
+            } else {
+                first_id = Some(agent_id);
+            }
+            ws.send(Message::Text(
+                serde_json::to_string(&ServerToAgent::HelloAccepted { heartbeat_sec: 1 })
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+            ws.close(None).await.unwrap();
+        }
+        agent.abort();
+        let _ = agent.await;
+    }
 
     #[test]
     fn scores_physical_interfaces() {
